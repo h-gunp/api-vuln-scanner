@@ -24,12 +24,15 @@ DISCOVERY_JOB_ID = "discovery-job"
 EXECUTION_JOB_ID = "execution-job"
 
 
-def profile_payload() -> dict[str, object]:
+def profile_payload(
+    *,
+    base_url: str = "http://vuln-bank.local",
+) -> dict[str, object]:
     return {
         "schema_version": "1.1",
         "scan_id": SCAN_ID,
         "target": {
-            "base_url": "http://vuln-bank.local",
+            "base_url": base_url,
             "allowed_paths": ["/api/*", "/openapi.json"],
             "allowed_methods": ["GET"],
         },
@@ -183,6 +186,17 @@ class ResultFailingBackend(RecordingBackend):
         return super().publish_artifact(envelope)
 
 
+class CancelOnProgressBackend(RecordingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_stage: ScannerStage | None = None
+
+    def report_progress(self, job_id, stage, progress, statistics) -> None:
+        super().report_progress(job_id, stage, progress, statistics)
+        if job_id == EXECUTION_JOB_ID and stage is self.cancel_stage:
+            self.cancel(job_id)
+
+
 @pytest.fixture(autouse=True)
 def credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_A_USERNAME", "actor-a")
@@ -244,11 +258,13 @@ def execution_request(
     graph_source: ContractSource,
     analysis_source: ContractSource,
     plan_source: ContractSource,
+    *,
+    profile_source: ContractSource | None = None,
 ) -> ExecutionJobRequest:
     return ExecutionJobRequest(
         job_id=EXECUTION_JOB_ID,
         scan_id=SCAN_ID,
-        target_profile=ContractSource(inline=profile_payload()),
+        target_profile=profile_source or ContractSource(inline=profile_payload()),
         normalized_api_graph=graph_source,
         relationship_analysis=analysis_source,
         scan_plan=plan_source,
@@ -433,6 +449,38 @@ def test_runtime_sensitive_plan_identifier_fails_before_approval_or_result() -> 
     assert "token-a" not in repr(backend.error_reports)
 
 
+def test_retained_runtime_rejects_changed_profile_before_old_bearer_reaches_new_origin() -> None:
+    backend = RecordingBackend()
+    calls: list[httpx.Request] = []
+    scanner, _, requests_used = discover(backend, calls)
+    graph, analysis, plan = data_documents(requests_used)
+    execution_calls_start = len(calls)
+
+    with pytest.raises(
+        ExecutionJobError,
+        match="^execution runtime is invalid$",
+    ):
+        scanner.run_execution(
+            execution_request(
+                ContractSource(inline=graph),
+                ContractSource(inline=analysis),
+                ContractSource(inline=plan),
+                profile_source=ContractSource(
+                    inline=profile_payload(
+                        base_url="http://attacker.invalid",
+                    )
+                ),
+            )
+        )
+
+    assert calls[execution_calls_start:] == []
+    assert backend.approval_events == []
+    assert backend.error_reports[-1].code == "EXECUTION_RUNTIME_INVALID"
+    rendered = repr((backend.error_reports, scanner))
+    assert "attacker.invalid" not in rendered
+    assert "token-a" not in rendered
+
+
 def test_cancellation_before_approval_sends_no_transport_or_result() -> None:
     backend = RecordingBackend()
     backend.cancel(EXECUTION_JOB_ID)
@@ -456,6 +504,52 @@ def test_cancellation_before_approval_sends_no_transport_or_result() -> None:
     assert calls == []
     assert backend.approval_events == []
     assert backend.published == []
+    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+
+
+def test_policy_progress_callback_cancellation_prevents_approval_side_effect() -> None:
+    backend = CancelOnProgressBackend()
+    calls: list[httpx.Request] = []
+    scanner, graph, requests_used = discover(backend, calls)
+    backend.cancel_stage = ScannerStage.POLICY_VALIDATION
+    calls_before_execution = len(calls)
+
+    with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+        scanner.run_execution(
+            execution_request(
+                ContractSource(inline=graph),
+                ContractSource(inline=empty_analysis_payload()),
+                ContractSource(inline=empty_plan_payload(requests_used)),
+            )
+        )
+
+    assert len(calls) == calls_before_execution
+    assert backend.approval_events == []
+    assert not any(
+        item.artifact_type == "scan_result" for item in backend.published
+    )
+    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+
+
+def test_verifying_progress_callback_cancellation_prevents_result_publication() -> None:
+    backend = CancelOnProgressBackend()
+    calls: list[httpx.Request] = []
+    scanner, graph, requests_used = discover(backend, calls)
+    backend.cancel_stage = ScannerStage.VERIFYING
+
+    with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+        scanner.run_execution(
+            execution_request(
+                ContractSource(inline=graph),
+                ContractSource(inline=empty_analysis_payload()),
+                ContractSource(inline=empty_plan_payload(requests_used)),
+            )
+        )
+
+    assert len(backend.approval_events) == 1
+    assert not any(
+        item.artifact_type == "scan_result" for item in backend.published
+    )
     assert backend.progress_events[-1].stage is ScannerStage.CANCELED
 
 

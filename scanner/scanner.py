@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -157,6 +158,7 @@ class ExecutionOutcome:
 class _ScanState:
     requests_used: int = 0
     runtime: RuntimeContext | None = field(default=None, repr=False)
+    profile_fingerprint: str | None = field(default=None, repr=False)
 
     def retain_requests_used(self, value: int) -> None:
         self.requests_used = max(self.requests_used, value)
@@ -395,6 +397,7 @@ class Scanner:
         cancellation = CancellationGuard(self._backend)
         self._check_cancellation(request, cancellation)
         self._progress(request, ScannerStage.PROFILE_LOADING, {})
+        self._check_cancellation(request, cancellation)
 
         profile = self._load_execution_contract(
             request,
@@ -457,6 +460,7 @@ class Scanner:
         session_manager = SessionManager(client)
         if rehydrating:
             self._progress(request, ScannerStage.AUTHENTICATING, {"actors": 2})
+            self._check_cancellation(request, cancellation)
             try:
                 state.runtime = session_manager.authenticate(profile)
             except CancellationRequested:
@@ -521,6 +525,7 @@ class Scanner:
             ScannerStage.POLICY_VALIDATION,
             {"requests_used": budget.requests_used},
         )
+        self._check_cancellation(request, cancellation)
         executor = Executor(
             self._backend,
             client=client,
@@ -555,6 +560,7 @@ class Scanner:
             ScannerStage.EXECUTING,
             {"requests_used": budget.requests_used},
         )
+        self._check_cancellation(request, cancellation)
         result = executor.execute(
             job_id=request.job_id,
             profile=profile,
@@ -573,6 +579,7 @@ class Scanner:
                 "requests_used": budget.requests_used,
             },
         )
+        self._check_cancellation(request, cancellation)
         try:
             envelope = self._artifact_builder.build(
                 scan_id=request.scan_id,
@@ -653,6 +660,17 @@ class Scanner:
         if state is None:
             state = _ScanState()
             self._scan_states[request.scan_id] = state
+        profile_fingerprint = _target_profile_fingerprint(profile)
+        if state.profile_fingerprint is None:
+            state.profile_fingerprint = profile_fingerprint
+        elif state.profile_fingerprint != profile_fingerprint:
+            self._execution_fail(
+                request,
+                code="EXECUTION_RUNTIME_INVALID",
+                stage=ScannerStage.PROFILE_LOADING,
+                retryable=False,
+                message="execution runtime is invalid",
+            )
         try:
             restored = self._backend.get_requests_used(request.job_id)
             if (
@@ -725,6 +743,7 @@ class Scanner:
         if state is None:
             state = _ScanState()
             self._scan_states[request.scan_id] = state
+        profile_fingerprint = _target_profile_fingerprint(profile)
         try:
             restored = self._backend.get_requests_used(request.job_id)
             if (
@@ -751,6 +770,16 @@ class Scanner:
                 stage=ScannerStage.PROFILE_LOADING,
                 retryable=False,
                 message="discovery request count is invalid",
+            )
+        if state.profile_fingerprint is None:
+            state.profile_fingerprint = profile_fingerprint
+        elif state.profile_fingerprint != profile_fingerprint:
+            self._fail(
+                request,
+                code="DISCOVERY_PROFILE_INVALID",
+                stage=ScannerStage.PROFILE_LOADING,
+                retryable=False,
+                message="discovery profile is invalid",
             )
         return state, budget
 
@@ -1366,3 +1395,13 @@ def _runtime_external_text_is_safe(
         },
     )
     return isinstance(cleaned, str) and cleaned == value
+
+
+def _target_profile_fingerprint(profile: TargetProfile) -> str:
+    canonical = json.dumps(
+        profile.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
