@@ -299,6 +299,12 @@ def test_collect_response_keeps_object_ids_and_examples_private():
     ] == {"1"}
     assert runtime.openapi_parameter_examples == {}
     assert runtime.sensitive_values() >= {"acct-b-1", "41", "card-b-1", "1"}
+    structural_values = runtime.structural_identifier_values()
+    assert {
+        value.reveal() for value in structural_values
+    } == {"acct-b-1", "41", "card-b-1"}
+    assert "1" not in repr(structural_values)
+    assert "acct-b-1" not in repr(structural_values)
 
     assert "acct-b-1" not in repr(runtime)
     assert "card-b-1" not in repr(runtime)

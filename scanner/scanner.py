@@ -941,7 +941,7 @@ class Scanner:
                     (field.field_path, field.type): field for field in inferred
                 }
         operations: list[Operation] = []
-        untrusted_runtime_components = self._untrusted_runtime_components(runtime)
+        untrusted_runtime_components = self._sensitive_runtime_components(runtime)
         for operation in graph.operations:
             actor_outputs = observed_outputs.get(operation.operation_id, {})
             merged_outputs = {
@@ -1182,6 +1182,14 @@ class Scanner:
 
     @staticmethod
     def _untrusted_runtime_components(runtime: RuntimeContext) -> set[str]:
+        return {
+            identifier.reveal()
+            for identifier in runtime.structural_identifier_values()
+            if len(identifier.reveal()) >= _MIN_RUNTIME_COMPONENT_LENGTH
+        }
+
+    @staticmethod
+    def _sensitive_runtime_components(runtime: RuntimeContext) -> set[str]:
         return {
             value
             for value in runtime.sensitive_values()
