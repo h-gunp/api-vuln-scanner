@@ -31,6 +31,7 @@ def profile_payload(
     scan_id: str = SCAN_ID,
     sources: list[str] | None = None,
     allowed_paths: list[str] | None = None,
+    max_requests: int = 40,
 ) -> dict[str, object]:
     return {
         "schema_version": "1.1",
@@ -71,7 +72,7 @@ def profile_payload(
             ],
         },
         "safety_policy": {
-            "max_requests": 40,
+            "max_requests": max_requests,
             "requests_per_second": 10000,
             "state_change_policy": "deny",
             "approved_modules": [
@@ -180,9 +181,13 @@ def actor_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_B_PASSWORD", "password-b")
 
 
-def request_for(source: ContractSource) -> DiscoveryJobRequest:
+def request_for(
+    source: ContractSource,
+    *,
+    job_id: str = JOB_ID,
+) -> DiscoveryJobRequest:
     return DiscoveryJobRequest(
-        job_id=JOB_ID,
+        job_id=job_id,
         scan_id=SCAN_ID,
         target_profile=source,
     )
@@ -492,6 +497,108 @@ def test_invalid_restored_request_count_fails_before_transport() -> None:
     assert backend.error_reports[-1].code == "DISCOVERY_REQUEST_COUNT_INVALID"
 
 
+def test_same_scan_new_job_rejects_retained_count_above_current_profile_cap() -> None:
+    backend = RecordingBackend()
+    calls: list[tuple[str, str, str | None]] = []
+    scanner = Scanner(
+        backend,
+        transport=discovery_transport(calls),
+        katana_runner=FakeKatanaRunner(),
+    )
+    first = scanner.run_discovery(
+        request_for(
+            ContractSource(
+                inline=profile_payload(sources=["openapi"])
+            )
+        )
+    )
+    second_job_calls_start = len(calls)
+
+    with pytest.raises(
+        DiscoveryJobError,
+        match="^discovery request count is invalid$",
+    ):
+        scanner.run_discovery(
+            request_for(
+                ContractSource(
+                    inline=profile_payload(
+                        sources=["openapi"],
+                        max_requests=first.requests_used - 1,
+                    )
+                ),
+                job_id="job-002",
+            )
+        )
+
+    assert len(calls) == second_job_calls_start
+    assert backend.error_events[-1].job_id == "job-002"
+    assert backend.error_reports[-1].code == "DISCOVERY_REQUEST_COUNT_INVALID"
+
+
+def test_same_scan_new_job_budget_checks_current_job_cancellation() -> None:
+    backend = RecordingBackend()
+    calls: list[tuple[str, str, str | None]] = []
+    second_job = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal second_job
+        body = json.loads(request.content) if request.content else {}
+        calls.append(
+            (request.method, request.url.path, body.get("username"))
+        )
+        if request.method == "POST":
+            if second_job:
+                backend.cancel("job-002")
+            username = body["username"]
+            return httpx.Response(
+                200,
+                json={"access_token": f"token-{username[-1]}"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(
+                200,
+                json=openapi_document(),
+                request=request,
+            )
+        if request.url.path == "/api/accounts":
+            return httpx.Response(
+                200,
+                json={"items": []},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(),
+    )
+    scanner.run_discovery(
+        request_for(
+            ContractSource(
+                inline=profile_payload(sources=["openapi"])
+            )
+        )
+    )
+    second_job = True
+    second_job_calls_start = len(calls)
+
+    with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+        scanner.run_discovery(
+            request_for(
+                ContractSource(
+                    inline=profile_payload(sources=["openapi"])
+                ),
+                job_id="job-002",
+            )
+        )
+
+    assert len(calls) - second_job_calls_start == 1
+    assert backend.progress_events[-1].job_id == "job-002"
+    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+
+
 def test_openapi_success_and_katana_failure_completes_with_warning() -> None:
     backend = RecordingBackend()
     calls: list[tuple[str, str, str | None]] = []
@@ -513,6 +620,26 @@ def test_openapi_success_and_katana_failure_completes_with_warning() -> None:
         event.code == "DISCOVERY_KATANA_FAILED"
         and event.level == "WARNING"
         for event in audit.events
+    )
+
+
+def test_default_scanner_retains_redacted_katana_failure_warning() -> None:
+    backend = RecordingBackend()
+    calls: list[tuple[str, str, str | None]] = []
+    scanner = Scanner(
+        backend,
+        transport=discovery_transport(calls),
+        katana_runner=FakeKatanaRunner(fail=True),
+    )
+
+    scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload()))
+    )
+
+    assert any(
+        event.code == "DISCOVERY_KATANA_FAILED"
+        and event.level == "WARNING"
+        for event in scanner.audit_events
     )
 
 
@@ -584,3 +711,141 @@ def test_openapi_and_katana_operations_are_refiltered_before_graph_publish() -> 
     assert "/api/transfer" not in paths
     assert "/api/stolen" not in paths
     assert all(operation.method == "GET" for operation in outcome.graph.operations)
+
+
+def test_actor_specific_response_keys_and_runtime_paths_never_enter_graph() -> None:
+    backend = RecordingBackend()
+
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/accounts": {
+                "get": {
+                    "responses": {
+                        "200": {"description": "runtime shape"}
+                    }
+                }
+            },
+            "/api/accounts/account-a-secret": {
+                "get": {
+                    "responses": {
+                        "200": {"description": "concrete runtime path"}
+                    }
+                }
+            },
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            username = json.loads(request.content)["username"]
+            return httpx.Response(
+                200,
+                json={"access_token": f"token-{username[-1]}"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=document, request=request)
+        if request.url.path == "/api/accounts":
+            actor = request.headers["authorization"][-1]
+            account_id = f"account-{actor}-secret"
+            return httpx.Response(
+                200,
+                json={
+                    "common": {"status": "ok"},
+                    account_id: {"balance": 10},
+                    "items": [{"account_id": account_id}],
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={"common": {"status": "ok"}},
+            request=request,
+        )
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(
+            ContractSource(
+                inline=profile_payload(sources=["openapi"])
+            )
+        )
+    )
+
+    assert [
+        operation.path_template for operation in outcome.graph.operations
+    ] == ["/api/accounts"]
+    assert {
+        field.field_path for field in outcome.graph.operations[0].outputs
+    } >= {"common", "common.status"}
+    rendered = (
+        outcome.graph.model_dump_json()
+        + backend.published[0].content.decode()
+        + repr(backend.__dict__)
+        + repr(scanner)
+    )
+    for secret in (
+        "account-a-secret",
+        "account-b-secret",
+        "token-a",
+        "token-b",
+        "password-a",
+        "password-b",
+    ):
+        assert secret not in rendered
+
+
+def test_cancellation_from_final_object_response_prevents_graph_publication() -> None:
+    backend = RecordingBackend()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            username = json.loads(request.content)["username"]
+            return httpx.Response(
+                200,
+                json={"access_token": f"token-{username[-1]}"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(
+                200,
+                json=openapi_document(),
+                request=request,
+            )
+        if request.url.path == "/api/accounts":
+            if request.headers["authorization"] == "Bearer token-b":
+                backend.cancel(JOB_ID)
+            return httpx.Response(
+                200,
+                json={"items": [{"account_id": "account-secret"}]},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(),
+    )
+
+    with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+        scanner.run_discovery(
+            request_for(
+                ContractSource(
+                    inline=profile_payload(sources=["openapi"])
+                )
+            )
+        )
+
+    assert backend.published == []
+    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.COMPLETED
+        for event in backend.progress_events
+    )

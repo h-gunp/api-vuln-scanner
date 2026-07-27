@@ -5,20 +5,21 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, TypeVar, cast
+from typing import Callable, Literal, TypeVar, cast
 from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
 from scanner.artifacts import ArtifactBuilder, Redactor
-from scanner.audit import AuditEvent, AuditSink
+from scanner.audit import AuditEvent, AuditSink, InMemoryAuditSink
 from scanner.auth.session_manager import RuntimeContext, SessionManager
 from scanner.contracts import (
     ContractSource,
     DiscoveryJobRequest,
     NormalizedApiGraph,
     Operation,
+    OutputField,
     PolicyModule,
     TargetProfile,
 )
@@ -38,6 +39,7 @@ from scanner.integration.backend_client import (
     ScannerStage,
 )
 from scanner.policy import (
+    BudgetLease,
     BudgetExceeded,
     CancellationGuard,
     CancellationRequested,
@@ -120,8 +122,36 @@ class DiscoveryOutcome:
 
 @dataclass
 class _ScanState:
-    budget: RequestBudget = field(repr=False)
+    requests_used: int = 0
     runtime: RuntimeContext | None = field(default=None, repr=False)
+
+    def retain_requests_used(self, value: int) -> None:
+        self.requests_used = max(self.requests_used, value)
+
+
+class _TrackedRequestBudget(RequestBudget):
+    """Current-job enforcement that only retains its monotonic count."""
+
+    def __init__(
+        self,
+        *,
+        on_change: Callable[[int], None],
+        **kwargs: object,
+    ) -> None:
+        self._on_change = on_change
+        super().__init__(**kwargs)
+
+    def restore(self, value: int) -> None:
+        super().restore(value)
+        self._on_change(self.requests_used)
+
+    def reserve(self) -> None:
+        super().reserve()
+        self._on_change(self.requests_used)
+
+    def _close_lease(self, lease: BudgetLease) -> None:
+        super()._close_lease(lease)
+        self._on_change(self.requests_used)
 
 
 class Scanner:
@@ -136,15 +166,26 @@ class Scanner:
         artifact_builder: ArtifactBuilder | None = None,
         audit_sink: AuditSink | None = None,
     ) -> None:
+        resolved_audit_sink = (
+            audit_sink if audit_sink is not None else InMemoryAuditSink()
+        )
         self._backend = backend_client
         self._transport = transport
-        self._katana_runner = katana_runner or KatanaRunner(audit_sink=audit_sink)
+        self._katana_runner = katana_runner or KatanaRunner(
+            audit_sink=resolved_audit_sink
+        )
         self._artifact_builder = artifact_builder or ArtifactBuilder(Redactor())
-        self._audit_sink = audit_sink
+        self._audit_sink = resolved_audit_sink
         self._scan_states: dict[str, _ScanState] = {}
 
     def __repr__(self) -> str:
         return "Scanner()"
+
+    @property
+    def audit_events(self) -> tuple[AuditEvent, ...]:
+        if isinstance(self._audit_sink, InMemoryAuditSink):
+            return tuple(self._audit_sink.events)
+        return ()
 
     def run_discovery(
         self,
@@ -157,11 +198,11 @@ class Scanner:
         profile = self._load_profile(request)
         self._check_cancellation(request, cancellation)
 
-        state = self._state_for(request, profile, cancellation)
+        state, budget = self._state_for(request, profile, cancellation)
         policy = PolicyEnforcer(profile)
         client = SafeHttpClient(
             policy=policy,
-            budget=state.budget,
+            budget=budget,
             transport=self._transport,
             redactor=Redactor(),
             audit_sink=self._audit_sink,
@@ -199,7 +240,7 @@ class Scanner:
             request,
             profile,
             runtime,
-            state.budget,
+            budget,
             policy,
             module_id,
             cancellation,
@@ -229,7 +270,7 @@ class Scanner:
         self._progress(
             request,
             ScannerStage.NORMALIZING,
-            {"requests_used": state.budget.requests_used},
+            {"requests_used": budget.requests_used},
         )
         graph = normalize_openapi(request.scan_id, openapi_document, runtime)
         graph = self._filter_graph(graph, profile, policy, module_id)
@@ -242,7 +283,7 @@ class Scanner:
             ScannerStage.OBJECT_DISCOVERY,
             {
                 "operations": len(graph.operations),
-                "requests_used": state.budget.requests_used,
+                "requests_used": budget.requests_used,
             },
         )
         graph = self._collect_objects_and_outputs(
@@ -256,6 +297,11 @@ class Scanner:
             client,
             cancellation,
         )
+        self._check_cancellation(request, cancellation)
+        graph = self._remove_sensitive_structure(
+            graph,
+            runtime.sensitive_values(),
+        )
         available_object_types = tuple(
             sorted(
                 {
@@ -266,6 +312,7 @@ class Scanner:
             )
         )
 
+        self._check_cancellation(request, cancellation)
         try:
             envelope = self._artifact_builder.build(
                 scan_id=request.scan_id,
@@ -274,6 +321,16 @@ class Scanner:
                 payload=graph.model_dump(mode="json"),
                 sensitive_values=runtime.sensitive_values(),
             )
+        except Exception:
+            self._fail(
+                request,
+                code="DISCOVERY_GRAPH_PUBLISH_FAILED",
+                stage=ScannerStage.NORMALIZING,
+                retryable=True,
+                message="discovery graph publish failed",
+            )
+        self._check_cancellation(request, cancellation)
+        try:
             graph_artifact_ref = self._backend.publish_artifact(envelope)
         except Exception:
             self._fail(
@@ -288,8 +345,9 @@ class Scanner:
             "actors": len(runtime.sessions),
             "operations": len(graph.operations),
             "object_types": len(available_object_types),
-            "requests_used": state.budget.requests_used,
+            "requests_used": budget.requests_used,
         }
+        self._check_cancellation(request, cancellation)
         self._progress(request, ScannerStage.COMPLETED, statistics)
         return DiscoveryOutcome(
             job_id=request.job_id,
@@ -297,7 +355,7 @@ class Scanner:
             graph=graph,
             graph_artifact_ref=graph_artifact_ref,
             available_object_types=available_object_types,
-            requests_used=state.budget.requests_used,
+            requests_used=budget.requests_used,
         )
 
     def _load_profile(self, request: DiscoveryJobRequest) -> TargetProfile:
@@ -338,17 +396,10 @@ class Scanner:
         request: DiscoveryJobRequest,
         profile: TargetProfile,
         cancellation: CancellationGuard,
-    ) -> _ScanState:
+    ) -> tuple[_ScanState, RequestBudget]:
         state = self._scan_states.get(request.scan_id)
         if state is None:
-            state = _ScanState(
-                budget=RequestBudget(
-                    max_requests=profile.safety_policy.max_requests,
-                    requests_per_second=profile.safety_policy.requests_per_second,
-                    cancellation_guard=cancellation,
-                    job_id=request.job_id,
-                )
-            )
+            state = _ScanState()
             self._scan_states[request.scan_id] = state
         try:
             restored = self._backend.get_requests_used(request.job_id)
@@ -356,10 +407,19 @@ class Scanner:
                 isinstance(restored, bool)
                 or not isinstance(restored, int)
                 or restored < 0
-                or restored > profile.safety_policy.max_requests
             ):
                 raise ValueError("invalid restored request count")
-            state.budget.restore(max(state.budget.requests_used, restored))
+            restored = max(state.requests_used, restored)
+            if restored > profile.safety_policy.max_requests:
+                raise ValueError("invalid restored request count")
+            budget = _TrackedRequestBudget(
+                max_requests=profile.safety_policy.max_requests,
+                requests_per_second=profile.safety_policy.requests_per_second,
+                cancellation_guard=cancellation,
+                job_id=request.job_id,
+                on_change=state.retain_requests_used,
+            )
+            budget.restore(restored)
         except Exception:
             self._fail(
                 request,
@@ -368,7 +428,7 @@ class Scanner:
                 retryable=False,
                 message="discovery request count is invalid",
             )
-        return state
+        return state, budget
 
     def _probe_openapi(
         self,
@@ -483,7 +543,10 @@ class Scanner:
     ) -> NormalizedApiGraph:
         if module_id is None:
             return graph
-        operations = {operation.operation_id: operation for operation in graph.operations}
+        observed_outputs: dict[
+            str,
+            dict[str, dict[tuple[str, str], OutputField]],
+        ] = {}
         for actor_id in ("user_a", "user_b"):
             session = runtime.sessions[actor_id]
             for operation in graph.operations:
@@ -522,11 +585,29 @@ class Scanner:
                     body=snapshot.json_body,
                 )
                 inferred = infer_output_fields(snapshot.json_body)
-                merged_outputs = {
-                    field.field_path: field
-                    for field in [*operations[operation.operation_id].outputs, *inferred]
+                observed_outputs.setdefault(operation.operation_id, {})[actor_id] = {
+                    (field.field_path, field.type): field for field in inferred
                 }
-                operations[operation.operation_id] = operation.model_copy(
+        operations: list[Operation] = []
+        for operation in graph.operations:
+            actor_outputs = observed_outputs.get(operation.operation_id, {})
+            shared_keys: set[tuple[str, str]] = set()
+            if set(actor_outputs) == {"user_a", "user_b"}:
+                shared_keys = set(actor_outputs["user_a"]) & set(
+                    actor_outputs["user_b"]
+                )
+            merged_outputs = {
+                (output.field_path, output.type): output
+                for output in operation.outputs
+            }
+            merged_outputs.update(
+                {
+                    key: actor_outputs["user_a"][key]
+                    for key in shared_keys
+                }
+            )
+            operations.append(
+                operation.model_copy(
                     update={
                         "outputs": sorted(
                             merged_outputs.values(),
@@ -534,11 +615,72 @@ class Scanner:
                         )
                     }
                 )
+            )
         return NormalizedApiGraph(
             scan_id=graph.scan_id,
-            operations=[
-                operations[operation.operation_id] for operation in graph.operations
-            ],
+            operations=operations,
+        )
+
+    @classmethod
+    def _remove_sensitive_structure(
+        cls,
+        graph: NormalizedApiGraph,
+        sensitive_values: set[str],
+    ) -> NormalizedApiGraph:
+        values = tuple(
+            sorted(
+                (value for value in sensitive_values if value),
+                key=len,
+                reverse=True,
+            )
+        )
+        operations: list[Operation] = []
+        for operation in graph.operations:
+            if cls._contains_sensitive_structure(
+                (
+                    operation.operation_id,
+                    operation.method,
+                    operation.path_template,
+                ),
+                values,
+            ):
+                continue
+            inputs = [
+                input_field
+                for input_field in operation.inputs
+                if not cls._contains_sensitive_structure(
+                    (
+                        input_field.location,
+                        input_field.field_path,
+                        input_field.type,
+                    ),
+                    values,
+                )
+            ]
+            outputs = [
+                output_field
+                for output_field in operation.outputs
+                if not cls._contains_sensitive_structure(
+                    (output_field.field_path, output_field.type),
+                    values,
+                )
+            ]
+            operations.append(
+                operation.model_copy(
+                    update={"inputs": inputs, "outputs": outputs}
+                )
+            )
+        return NormalizedApiGraph(scan_id=graph.scan_id, operations=operations)
+
+    @staticmethod
+    def _contains_sensitive_structure(
+        structural_values: tuple[str, ...],
+        sensitive_values: tuple[str, ...],
+    ) -> bool:
+        return any(
+            sensitive_value in structural_value
+            for structural_value in structural_values
+            for sensitive_value in sensitive_values
         )
 
     @staticmethod
@@ -678,8 +820,6 @@ class Scanner:
         code: str,
         details: Mapping[str, object],
     ) -> None:
-        if self._audit_sink is None:
-            return
         self._audit_sink.emit(
             AuditEvent(
                 code=code,
