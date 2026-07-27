@@ -26,6 +26,10 @@ class KatanaError(Exception):
     """A fixed, secret-free Katana subprocess failure."""
 
 
+class _HeaderCleanupError(Exception):
+    """Internal marker for an irrecoverable secret-file cleanup failure."""
+
+
 @dataclass(frozen=True)
 class KatanaRecord:
     method: str
@@ -54,6 +58,9 @@ class KatanaRunner:
         redactor: Redactor | None = None,
         audit_sink: AuditSink | None = None,
         clock: Callable[[], float] = time.monotonic,
+        header_file_factory: Callable[..., Any] = NamedTemporaryFile,
+        header_file_remover: Callable[[Path], None] | None = None,
+        header_file_overwriter: Callable[[Path], None] | None = None,
     ) -> None:
         self._executable = executable
         self._process_factory = process_factory
@@ -63,6 +70,11 @@ class KatanaRunner:
         self._redactor = redactor or Redactor()
         self._audit_sink = audit_sink
         self._clock = clock
+        self._header_file_factory = header_file_factory
+        self._header_file_remover = header_file_remover or _unlink_header_file
+        self._header_file_overwriter = (
+            header_file_overwriter or _overwrite_header_file
+        )
 
     def run(
         self,
@@ -76,6 +88,8 @@ class KatanaRunner:
     ) -> KatanaRunResult:
         """Run one actor crawl and return only safe request method/URL records."""
 
+        if "GET" not in profile.target.allowed_methods:
+            return KatanaRunResult(records=(), requests_made=0)
         if (
             isinstance(allocated_requests, bool)
             or not isinstance(allocated_requests, int)
@@ -89,6 +103,7 @@ class KatanaRunner:
         header_path: Path | None = None
         process: Any | None = None
         failure: str | None = None
+        result: KatanaRunResult | None = None
         try:
             cancellation_guard.raise_if_cancelled(job_id)
             header_path = self._write_header_file(session.authorization_headers())
@@ -114,26 +129,32 @@ class KatanaRunner:
             if process.returncode != 0:
                 raise KatanaError("katana execution failed")
 
-            records = _parse_records(
+            records, requests_made = _parse_records(
                 stdout,
                 base_url=profile.target.base_url,
                 allowed_paths=profile.target.allowed_paths,
             )
             result = KatanaRunResult(
                 records=tuple(records),
-                requests_made=len(records),
+                requests_made=requests_made,
             )
-            self._emit(
-                code="KATANA_COMPLETED",
-                level="info",
-                profile=profile,
-                job_id=job_id,
-                details={"requests_used": result.requests_made},
-            )
-            return result
         except CancellationRequested:
-            if process is not None:
-                self._terminate(process)
+            stopped = process is None or self._stop_process(process)
+            failure = "cancelled" if stopped else "error"
+        except _HeaderCleanupError:
+            failure = "cleanup"
+        except Exception:
+            if process is not None and process.returncode is None:
+                self._stop_process(process)
+            failure = "error"
+        finally:
+            if header_path is not None and not self._cleanup_header_file(header_path):
+                failure = "cleanup"
+            lease.close()
+        if failure == "cleanup":
+            self._emit_failure(profile=profile, job_id=job_id)
+            raise KatanaError("katana cleanup failed")
+        if failure == "cancelled":
             self._emit(
                 code="KATANA_CANCELLED",
                 level="info",
@@ -141,28 +162,21 @@ class KatanaRunner:
                 job_id=job_id,
                 details={},
             )
-            failure = "cancelled"
-        except Exception:
-            if process is not None and process.returncode is None:
-                self._terminate(process)
-            self._emit(
-                code="KATANA_FAILED",
-                level="error",
-                profile=profile,
-                job_id=job_id,
-                details={"error": "katana execution failed"},
-            )
-            failure = "error"
-        finally:
-            if header_path is not None:
-                try:
-                    header_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            lease.close()
-        if failure == "cancelled":
             raise CancellationRequested("scan cancelled")
-        raise KatanaError("katana execution failed")
+        if failure == "error":
+            self._emit_failure(profile=profile, job_id=job_id)
+            raise KatanaError("katana execution failed")
+        if result is None:
+            self._emit_failure(profile=profile, job_id=job_id)
+            raise KatanaError("katana execution failed")
+        self._emit(
+            code="KATANA_COMPLETED",
+            level="info",
+            profile=profile,
+            job_id=job_id,
+            details={"requests_used": result.requests_made},
+        )
+        return result
 
     def _argv(
         self,
@@ -204,7 +218,7 @@ class KatanaRunner:
             if "\r" in name or "\n" in name or "\r" in value or "\n" in value:
                 raise KatanaError("katana execution failed")
         directory = str(self._temp_directory) if self._temp_directory is not None else None
-        with NamedTemporaryFile(
+        header_file = self._header_file_factory(
             mode="w",
             encoding="utf-8",
             newline="\n",
@@ -212,10 +226,21 @@ class KatanaRunner:
             suffix=".headers",
             dir=directory,
             delete=False,
-        ) as header_file:
+        )
+        header_path = Path(header_file.name)
+        try:
             for name, value in headers.items():
                 header_file.write(f"{name}: {value}\n")
-            return Path(header_file.name)
+            header_file.close()
+        except Exception:
+            try:
+                header_file.close()
+            except Exception:
+                pass
+            if not self._cleanup_header_file(header_path):
+                raise _HeaderCleanupError("katana cleanup failed") from None
+            raise KatanaError("katana execution failed") from None
+        return header_path
 
     def _communicate(
         self,
@@ -228,7 +253,6 @@ class KatanaRunner:
         while True:
             cancellation_guard.raise_if_cancelled(job_id)
             if self._clock() >= deadline:
-                self._terminate(process)
                 raise KatanaError("katana execution failed")
             try:
                 stdout, _stderr = process.communicate(
@@ -238,12 +262,56 @@ class KatanaRunner:
             except subprocess.TimeoutExpired:
                 continue
 
-    def _terminate(self, process: Any) -> None:
+    def _stop_process(self, process: Any) -> bool:
+        if process.returncode is not None:
+            return True
         try:
             process.terminate()
+        except Exception:
+            pass
+        if self._wait_for_exit(process):
+            return True
+        try:
+            process.kill()
+        except Exception:
+            return False
+        return self._wait_for_exit(process)
+
+    def _wait_for_exit(self, process: Any) -> bool:
+        try:
             process.wait(timeout=self._TERMINATE_TIMEOUT_SECONDS)
         except Exception:
-            return
+            return False
+        return process.returncode is not None
+
+    def _cleanup_header_file(self, path: Path) -> bool:
+        try:
+            self._header_file_remover(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            pass
+        try:
+            self._header_file_overwriter(path)
+        except OSError:
+            pass
+        try:
+            self._header_file_remover(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+
+    def _emit_failure(self, *, profile: TargetProfile, job_id: str) -> None:
+        self._emit(
+            code="KATANA_FAILED",
+            level="error",
+            profile=profile,
+            job_id=job_id,
+            details={"error": "katana execution failed"},
+        )
 
     def _emit(
         self,
@@ -290,8 +358,9 @@ def _parse_records(
     *,
     base_url: str,
     allowed_paths: Sequence[str],
-) -> list[KatanaRecord]:
+) -> tuple[list[KatanaRecord], int]:
     records: list[KatanaRecord] = []
+    requests_made = 0
     for line in stdout.splitlines():
         try:
             payload = json.loads(line)
@@ -306,15 +375,16 @@ def _parse_records(
         else:
             method = payload.get("method")
             url = payload.get("url")
+        if not isinstance(method, str) or not isinstance(url, str):
+            continue
+        requests_made += 1
         if (
-            not isinstance(method, str)
-            or not isinstance(url, str)
-            or method.upper() != "GET"
+            method.upper() != "GET"
             or not _url_in_scope(url, base_url, allowed_paths)
         ):
             continue
         records.append(KatanaRecord(method="GET", url=url))
-    return records
+    return records, requests_made
 
 
 def _url_in_scope(
@@ -353,3 +423,12 @@ def _normalized_path(parsed: SplitResult) -> str | None:
 def _normalized_allowed_path(path: str) -> str:
     normalized = posixpath.normpath(path if path.startswith("/") else f"/{path}")
     return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+def _unlink_header_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _overwrite_header_file(path: Path) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as header_file:
+        header_file.truncate(0)

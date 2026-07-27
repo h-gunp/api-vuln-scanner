@@ -245,3 +245,72 @@ def test_infer_output_fields_reports_only_nested_shape():
         {"field_path": "next_page", "type": "integer"},
     ]
     assert "acct-secret" not in repr(output)
+
+
+def test_merge_katana_records_generalizes_uuid_versions_6_7_and_8():
+    raw_ids = [
+        "1ef01234-5678-6abc-8def-0123456789ab",
+        "01890abc-def0-7abc-8def-0123456789ab",
+        "01234567-89ab-8cde-8f01-23456789abcd",
+    ]
+    graph = normalize_openapi(
+        "scan-001",
+        {"openapi": "3.1.0", "paths": {}},
+        RuntimeContext(scan_id="scan-001"),
+    )
+
+    merged = merge_katana_records(
+        graph,
+        [
+            KatanaRecord("GET", f"http://vuln-bank.local/api/v{version}/{raw_id}")
+            for version, raw_id in zip((6, 7, 8), raw_ids, strict=True)
+        ],
+    )
+
+    assert [operation.path_template for operation in merged.operations] == [
+        "/api/v6/{id}",
+        "/api/v7/{id}",
+        "/api/v8/{id}",
+    ]
+    rendered = merged.model_dump_json()
+    assert all(raw_id not in rendered for raw_id in raw_ids)
+
+
+def test_operation_parameter_override_replaces_required_and_example_metadata():
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/search": {
+                "parameters": [
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": True,
+                        "example": "path-example",
+                        "schema": {"type": "integer", "default": 1},
+                    }
+                ],
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "page",
+                            "in": "query",
+                            "required": False,
+                            "example": "operation-example",
+                            "schema": {"type": "integer", "default": 9},
+                        }
+                    ],
+                    "responses": {"204": {"description": "no content"}},
+                },
+            }
+        },
+    }
+    runtime = RuntimeContext(scan_id="scan-001")
+
+    graph = normalize_openapi("scan-001", document, runtime)
+
+    assert [field.model_dump() for field in graph.operations[0].inputs] == [
+        {"location": "query", "field_path": "page", "type": "integer"}
+    ]
+    assert runtime.required_inputs == {}
+    assert runtime.sensitive_values() == {"operation-example", "9"}

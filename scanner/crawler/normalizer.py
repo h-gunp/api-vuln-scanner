@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from scanner.auth.session_manager import RuntimeContext, _RuntimeSecret
 from scanner.contracts import (
@@ -18,10 +19,6 @@ from scanner.crawler.katana_runner import KatanaRecord
 
 _HTTP_METHODS = frozenset(
     {"get", "put", "post", "delete", "options", "head", "patch", "trace"}
-)
-_UUID_SEGMENT = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
-    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 _HEX_SEGMENT = re.compile(r"^[0-9a-fA-F]{16,}$")
 _NUMERIC_SEGMENT = re.compile(r"^\d+$")
@@ -61,9 +58,13 @@ def normalize_openapi(
 
             operation_id = f"{method}:{raw_path}"
             operation_parameters = _parameter_list(raw_operation.get("parameters"))
+            effective_parameters = _merge_parameters(
+                path_parameters, operation_parameters
+            )
+            _clear_operation_metadata(runtime, operation_id)
             inputs = _normalize_parameters(
                 operation_id,
-                [*path_parameters, *operation_parameters],
+                effective_parameters,
                 runtime,
             )
             inputs.extend(
@@ -143,6 +144,30 @@ def _parameter_list(value: object) -> list[Mapping[str, object]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, Mapping)]
+
+
+def _merge_parameters(
+    path_parameters: list[Mapping[str, object]],
+    operation_parameters: list[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    effective: dict[tuple[str, str], Mapping[str, object]] = {}
+    unkeyed: list[Mapping[str, object]] = []
+    for parameter in [*path_parameters, *operation_parameters]:
+        name = parameter.get("name")
+        location = parameter.get("in")
+        if isinstance(name, str) and isinstance(location, str):
+            effective[(location, name)] = parameter
+        else:
+            unkeyed.append(parameter)
+    return [*effective.values(), *unkeyed]
+
+
+def _clear_operation_metadata(runtime: RuntimeContext, operation_id: str) -> None:
+    runtime.required_inputs.pop(operation_id, None)
+    for key in [
+        key for key in runtime.parameter_examples if key[0] == operation_id
+    ]:
+        del runtime.parameter_examples[key]
 
 
 def _normalize_parameters(
@@ -434,7 +459,18 @@ def _generalize_path(path: str) -> tuple[str, list[str]]:
 
 
 def _is_identifier_segment(segment: str) -> bool:
-    return any(
-        pattern.fullmatch(segment) is not None
-        for pattern in (_NUMERIC_SEGMENT, _UUID_SEGMENT, _HEX_SEGMENT)
+    return (
+        _NUMERIC_SEGMENT.fullmatch(segment) is not None
+        or _is_canonical_uuid(segment)
+        or _HEX_SEGMENT.fullmatch(segment) is not None
     )
+
+
+def _is_canonical_uuid(segment: str) -> bool:
+    if len(segment) != 36:
+        return False
+    try:
+        parsed = UUID(segment)
+    except ValueError:
+        return False
+    return str(parsed) == segment.casefold()

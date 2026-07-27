@@ -19,7 +19,7 @@ from scanner.policy import (
 )
 
 
-def target_profile() -> TargetProfile:
+def target_profile(*, allowed_methods: list[str] | None = None) -> TargetProfile:
     return TargetProfile.model_validate(
         {
             "schema_version": "1.1",
@@ -27,7 +27,7 @@ def target_profile() -> TargetProfile:
             "target": {
                 "base_url": "http://vuln-bank.local",
                 "allowed_paths": ["/api/*", "/health"],
-                "allowed_methods": ["GET"],
+                "allowed_methods": allowed_methods or ["GET"],
             },
             "discovery": {"sources": ["openapi", "crawl"], "max_depth": 2},
             "authentication": {
@@ -80,6 +80,7 @@ class FakeProcess:
         self._timed_out = False
         self.returncode: int | None = None
         self.terminated = False
+        self.killed = False
         self.wait_timeouts: list[float] = []
         self.communicate_timeouts: list[float] = []
 
@@ -99,6 +100,26 @@ class FakeProcess:
     def wait(self, *, timeout: float) -> int:
         self.wait_timeouts.append(timeout)
         return self.returncode if self.returncode is not None else 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
+class UnkillableFakeProcess(FakeProcess):
+    def __init__(self, backend: FakeBackendClient) -> None:
+        super().__init__(cancel_backend=backend)
+        self.shutdown_events: list[str] = []
+
+    def terminate(self) -> None:
+        self.shutdown_events.append("terminate")
+
+    def kill(self) -> None:
+        self.shutdown_events.append("kill")
+
+    def wait(self, *, timeout: float) -> int:
+        self.shutdown_events.append("wait")
+        raise subprocess.TimeoutExpired("katana", timeout)
 
 
 class FakeProcessFactory:
@@ -125,6 +146,23 @@ class FailingProcessFactory:
         self.header_path = Path(argv[argv.index("-H") + 1])
         token = self.header_path.read_text(encoding="utf-8").strip()
         raise RuntimeError(f"launch failed with {token}")
+
+
+class FailingHeaderFile:
+    def __init__(self, path: Path, *, failure: str) -> None:
+        self._file = path.open("w", encoding="utf-8", newline="\n")
+        self.name = str(path)
+        self._failure = failure
+
+    def write(self, value: str) -> int:
+        if self._failure == "write":
+            raise OSError("header write failed")
+        return self._file.write(value)
+
+    def close(self) -> None:
+        self._file.close()
+        if self._failure == "close":
+            raise OSError("header close failed")
 
 
 def test_runner_uses_exact_safe_argv_distinct_header_files_and_filtered_records(
@@ -223,7 +261,7 @@ def test_runner_uses_exact_safe_argv_distinct_header_files_and_filtered_records(
     ]
     assert all(not path.exists() for path in factory.header_paths)
     assert result_a == result_b
-    assert result_a.requests_made == 2
+    assert result_a.requests_made == 5
     assert [(record.method, record.url) for record in result_a.records] == [
         ("GET", "http://vuln-bank.local/api/accounts"),
         ("GET", "http://vuln-bank.local/api/cards/abc"),
@@ -321,6 +359,34 @@ def test_runner_terminates_on_cancellation_and_deletes_header(
     assert cancellation.value.__cause__ is None
 
 
+def test_runner_kills_stubborn_process_and_does_not_report_cancellation_success(
+    tmp_path: Path,
+):
+    backend = FakeBackendClient()
+    process = UnkillableFakeProcess(backend)
+    factory = FakeProcessFactory([process])
+    runner = KatanaRunner(process_factory=factory, temp_directory=tmp_path)
+    budget = RequestBudget(max_requests=2, requests_per_second=100)
+
+    with pytest.raises(KatanaError, match="^katana execution failed$") as error:
+        runner.run(
+            target_profile(),
+            session=ActorSession("user_a", token="token-a"),
+            allocated_requests=2,
+            budget=budget,
+            cancellation_guard=CancellationGuard(backend),
+            job_id="job-001",
+        )
+
+    assert process.shutdown_events == ["terminate", "wait", "kill", "wait"]
+    assert process.returncode is None
+    assert budget.requests_used == 2
+    assert not factory.header_paths[0].exists()
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+    assert "token-a" not in repr(error.value)
+
+
 def test_runner_does_not_start_without_a_budget_allocation(tmp_path: Path):
     factory = FakeProcessFactory([])
     runner = KatanaRunner(process_factory=factory, temp_directory=tmp_path)
@@ -344,6 +410,27 @@ def test_runner_does_not_start_without_a_budget_allocation(tmp_path: Path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_runner_does_not_allocate_or_start_when_get_is_not_allowed(tmp_path: Path):
+    factory = FakeProcessFactory([])
+    runner = KatanaRunner(process_factory=factory, temp_directory=tmp_path)
+    budget = RequestBudget(max_requests=1, requests_per_second=100)
+
+    result = runner.run(
+        target_profile(allowed_methods=["POST"]),
+        session=ActorSession("user_a", token="token-a"),
+        allocated_requests=1,
+        budget=budget,
+        cancellation_guard=CancellationGuard(FakeBackendClient()),
+        job_id="job-001",
+    )
+
+    assert result.records == ()
+    assert result.requests_made == 0
+    assert budget.requests_used == 0
+    assert factory.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_runner_rejects_header_injection_without_leaving_a_temp_file(tmp_path: Path):
     factory = FakeProcessFactory([])
     runner = KatanaRunner(process_factory=factory, temp_directory=tmp_path)
@@ -362,3 +449,76 @@ def test_runner_rejects_header_injection_without_leaving_a_temp_file(tmp_path: P
     assert factory.calls == []
     assert budget.requests_used == 1
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["write", "close"])
+def test_runner_cleans_up_when_header_write_or_close_fails(
+    tmp_path: Path, failure: str
+):
+    header_path = tmp_path / f"{failure}.headers"
+
+    def header_file_factory(**kwargs: object) -> FailingHeaderFile:
+        return FailingHeaderFile(header_path, failure=failure)
+
+    factory = FakeProcessFactory([])
+    runner = KatanaRunner(
+        process_factory=factory,
+        temp_directory=tmp_path,
+        header_file_factory=header_file_factory,
+    )
+    budget = RequestBudget(max_requests=1, requests_per_second=100)
+
+    with pytest.raises(KatanaError, match="^katana execution failed$") as error:
+        runner.run(
+            target_profile(),
+            session=ActorSession("user_a", token="token-a"),
+            allocated_requests=1,
+            budget=budget,
+            cancellation_guard=CancellationGuard(FakeBackendClient()),
+            job_id="job-001",
+        )
+
+    assert not header_path.exists()
+    assert factory.calls == []
+    assert budget.requests_used == 1
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+
+
+def test_runner_overwrites_and_retries_irrecoverable_header_delete_failure(
+    tmp_path: Path,
+):
+    remove_attempts: list[Path] = []
+
+    def failing_remover(path: Path) -> None:
+        remove_attempts.append(path)
+        raise OSError("delete failed with token-a")
+
+    factory = FakeProcessFactory([FakeProcess()])
+    runner = KatanaRunner(
+        process_factory=factory,
+        temp_directory=tmp_path,
+        header_file_remover=failing_remover,
+    )
+    budget = RequestBudget(max_requests=1, requests_per_second=100)
+
+    with pytest.raises(KatanaError, match="^katana cleanup failed$") as error:
+        runner.run(
+            target_profile(),
+            session=ActorSession("user_a", token="token-a"),
+            allocated_requests=1,
+            budget=budget,
+            cancellation_guard=CancellationGuard(FakeBackendClient()),
+            job_id="job-001",
+        )
+
+    header_path = factory.header_paths[0]
+    try:
+        assert remove_attempts == [header_path, header_path]
+        assert header_path.read_text(encoding="utf-8") == ""
+        assert budget.requests_used == 1
+        assert error.value.__context__ is None
+        assert error.value.__cause__ is None
+        assert "token-a" not in repr(error.value)
+    finally:
+        header_path.unlink(missing_ok=True)
