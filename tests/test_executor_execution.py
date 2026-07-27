@@ -86,6 +86,15 @@ class SecretReferenceBackend(FakeBackendClient):
         return "runtime-token-a"
 
 
+class FixedReferenceBackend(FakeBackendClient):
+    def __init__(self, reference: str) -> None:
+        super().__init__()
+        self._reference = reference
+
+    def publish_artifact(self, envelope):
+        return self._reference
+
+
 def _documents(
     module_ids: tuple[str, ...] = ("BOLA-001", "INPUT-001", "DATA-001"),
     *,
@@ -405,6 +414,7 @@ def _execute(
     restored_requests: int | None = None,
     decision: PlanApprovalDecision | None = None,
     client: SafeHttpClient | None | object = ...,
+    runtime: RuntimeContext | None = None,
 ) -> tuple[ScanResult, FakeBackendClient, InMemoryAuditSink, RequestBudget, list]:
     backend, audit, budget, resolved_client, calls = _execution_dependencies(
         documents,
@@ -426,7 +436,7 @@ def _execute(
         graph=documents.graph,
         analysis=documents.analysis,
         plan=documents.plan,
-        runtime=_runtime(),
+        runtime=runtime or _runtime(),
         decision=decision or _decision(),
     )
     return result, backend, audit, budget, calls
@@ -743,6 +753,142 @@ def test_forged_step_identifier_is_not_copied_to_audit_or_error_state() -> None:
     assert "runtime-token-a" not in rendered
 
 
+def test_matching_runtime_secret_operation_ids_are_rejected_before_transport() -> None:
+    documents = _documents(("DATA-001",))
+    documents.graph.operations[0].operation_id = "runtime-token-a"
+    documents.analysis.test_candidates[0].target_operation_id = "runtime-token-a"
+    documents.plan.steps[0].target_operation_id = "runtime-token-a"
+    module = FixedOutcomeModule(_verified(), requests=1)
+
+    result, backend, audit, budget, transport_calls = _execute(
+        documents,
+        modules={"DATA-001": module},
+    )
+
+    assert result.findings == []
+    assert module.calls == []
+    assert transport_calls == []
+    assert budget.requests_used == 3
+    assert backend.error_reports[-1].code == "EXECUTION_STEP_INVALID"
+    assert "runtime-token-a" not in repr((result, backend.error_reports, audit.events))
+
+
+def test_matching_runtime_secret_candidate_ids_are_rejected_before_transport() -> None:
+    documents = _documents(("DATA-001",))
+    documents.analysis.test_candidates[0].candidate_id = "runtime-token-a"
+    documents.plan.steps[0].candidate_id = "runtime-token-a"
+    module = FixedOutcomeModule(_verified(), requests=1)
+
+    result, backend, audit, _, transport_calls = _execute(
+        documents,
+        modules={"DATA-001": module},
+    )
+
+    assert result.findings == []
+    assert module.calls == []
+    assert transport_calls == []
+    assert backend.error_reports[-1].code == "EXECUTION_STEP_INVALID"
+    assert "runtime-token-a" not in repr((result, backend.error_reports, audit.events))
+
+
+def test_matching_runtime_secret_plan_ids_are_rejected_before_transport() -> None:
+    documents = _documents(("DATA-001",))
+    documents.plan.plan_id = "runtime-token-a"
+    module = FixedOutcomeModule(_verified(), requests=1)
+    decision = PlanApprovalDecision(
+        scan_id="scan-001",
+        plan_id="runtime-token-a",
+        status=ApprovalStatus.APPROVED,
+        reason_codes=(),
+    )
+
+    result, backend, audit, _, transport_calls = _execute(
+        documents,
+        modules={"DATA-001": module},
+        decision=decision,
+    )
+
+    assert result.findings == []
+    assert module.calls == []
+    assert transport_calls == []
+    assert backend.error_reports[-1].code == "EXECUTION_STEP_INVALID"
+    assert "runtime-token-a" not in repr((result, backend.error_reports, audit.events))
+
+
+def test_matching_runtime_secret_scan_ids_are_redacted_and_rejected() -> None:
+    documents = _documents(("DATA-001",))
+    runtime = _runtime()
+    runtime.scan_id = "runtime-token-a"
+    documents.profile.scan_id = "runtime-token-a"
+    documents.graph.scan_id = "runtime-token-a"
+    documents.analysis.scan_id = "runtime-token-a"
+    documents.plan.scan_id = "runtime-token-a"
+    module = FixedOutcomeModule(_verified(), requests=1)
+    decision = PlanApprovalDecision(
+        scan_id="runtime-token-a",
+        plan_id="plan-001",
+        status=ApprovalStatus.APPROVED,
+        reason_codes=(),
+    )
+
+    result, backend, audit, _, transport_calls = _execute(
+        documents,
+        modules={"DATA-001": module},
+        decision=decision,
+        runtime=runtime,
+    )
+
+    assert result.scan_id == "[REDACTED]"
+    assert result.findings == []
+    assert module.calls == []
+    assert transport_calls == []
+    assert backend.error_reports[-1].code == "EXECUTION_STEP_INVALID"
+    assert "runtime-token-a" not in repr((result, backend.error_reports, audit.events))
+
+
+def test_runtime_secret_affected_field_path_is_rejected_without_finding() -> None:
+    documents = _documents(("DATA-001",))
+    module = FixedOutcomeModule(
+        _verified(
+            affected_fields=(
+                AffectedField(
+                    location="response",
+                    field_path="runtime-token-a",
+                    data_class="authentication",
+                ),
+            )
+        )
+    )
+
+    result, backend, audit, _, _ = _execute(
+        documents,
+        modules={"DATA-001": module},
+    )
+
+    assert result.findings == []
+    assert backend.error_reports[-1].code == "EXECUTION_MODULE_FAILED"
+    assert "runtime-token-a" not in repr((result, backend.error_reports, audit.events))
+
+
+def test_fixed_module_id_remains_approved_when_it_equals_runtime_secret() -> None:
+    documents = _documents(("DATA-001",))
+    runtime = _runtime()
+    runtime.sessions["user_a"] = ActorSession(
+        actor_id="user_a",
+        token="DATA-001",
+    )
+    module = FixedOutcomeModule(_verified())
+
+    result, backend, _, _, _ = _execute(
+        documents,
+        modules={"DATA-001": module},
+        runtime=runtime,
+    )
+
+    assert len(result.findings) == 1
+    assert backend.error_reports == []
+
+
 def test_cancellation_does_not_copy_unvalidated_step_identifier_to_audit() -> None:
     documents = _documents(("DATA-001",))
     documents.plan.steps[0].target_operation_id = "runtime-token-a"
@@ -782,6 +928,52 @@ def test_malformed_verified_module_outcome_becomes_secret_free_module_failure() 
     assert "raw-module-secret" not in repr((backend.error_reports, audit.events))
 
 
+def test_string_verdict_never_falls_through_to_verified_finding() -> None:
+    documents = _documents(("DATA-001",))
+    malformed = ModuleOutcome(
+        verdict="not_found",  # type: ignore[arg-type]
+        rule_id="VERIFY-DATA-001",
+        conditions=("DATA_SENSITIVE_FIELD_UNMASKED",),
+        affected_fields=(
+            AffectedField(
+                location="response",
+                field_path="profile.password",
+                data_class="authentication",
+            ),
+        ),
+        evidence={},
+    )
+    module = FixedOutcomeModule(malformed)
+
+    result, backend, audit, _, _ = _execute(
+        documents,
+        modules={"DATA-001": module},
+    )
+
+    assert result.findings == []
+    assert backend.error_reports[-1].code == "EXECUTION_MODULE_FAILED"
+    assert audit.events[-1].code == "EXECUTION_MODULE_FAILED"
+
+
+def test_non_string_inconclusive_reason_becomes_secret_free_module_failure() -> None:
+    documents = _documents(("DATA-001",))
+    malformed = ModuleOutcome(
+        verdict=ModuleVerdict.INCONCLUSIVE,
+        rule_id="VERIFY-DATA-001",
+        reason_code=["raw-module-secret"],  # type: ignore[arg-type]
+    )
+    module = FixedOutcomeModule(malformed)
+
+    result, backend, audit, _, _ = _execute(
+        documents,
+        modules={"DATA-001": module},
+    )
+
+    assert result.findings == []
+    assert backend.error_reports[-1].code == "EXECUTION_MODULE_FAILED"
+    assert "raw-module-secret" not in repr((backend.error_reports, audit.events))
+
+
 def test_backend_reference_containing_runtime_secret_is_not_added_to_result() -> None:
     documents = _documents(("DATA-001",))
     backend = SecretReferenceBackend()
@@ -797,6 +989,51 @@ def test_backend_reference_containing_runtime_secret_is_not_added_to_result() ->
     assert backend.error_reports[-1].code == "EXECUTION_EVIDENCE_PUBLISH_FAILED"
     assert "runtime-token-a" not in result.model_dump_json()
     assert "runtime-token-a" not in repr((backend.error_reports, audit.events))
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://scanner.test/evidence",
+        "artifact:opaque?token=value",
+        "artifact:opaque#fragment",
+        "artifact:opaque/value",
+        "artifact:opaque value",
+        "artifact:opaque\nvalue",
+        "opaque-value",
+    ],
+)
+def test_non_opaque_backend_evidence_reference_is_rejected(
+    reference: str,
+) -> None:
+    documents = _documents(("DATA-001",))
+    backend = FixedReferenceBackend(reference)
+    module = FixedOutcomeModule(_verified())
+
+    result, backend, audit, _, _ = _execute(
+        documents,
+        backend=backend,
+        modules={"DATA-001": module},
+    )
+
+    assert result.findings == []
+    assert backend.error_reports[-1].code == "EXECUTION_EVIDENCE_PUBLISH_FAILED"
+    assert reference not in repr((result, backend.error_reports, audit.events))
+
+
+def test_strict_opaque_backend_evidence_reference_is_preserved_exactly() -> None:
+    documents = _documents(("DATA-001",))
+    backend = FixedReferenceBackend("artifact:A_1.test-2")
+    module = FixedOutcomeModule(_verified())
+
+    result, backend, _, _, _ = _execute(
+        documents,
+        backend=backend,
+        modules={"DATA-001": module},
+    )
+
+    assert result.findings[0].evidence_refs == ["artifact:A_1.test-2"]
+    assert backend.error_reports == []
 
 
 def test_empty_approved_plan_returns_valid_empty_scan_result_without_client() -> None:

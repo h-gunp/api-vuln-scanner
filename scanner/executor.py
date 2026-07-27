@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from urllib.parse import urljoin
 
-from scanner.artifacts import ArtifactBuilder, Redactor
+from scanner.artifacts import REDACTED, ArtifactBuilder, Redactor
 from scanner.audit import AuditEvent, AuditSink, InMemoryAuditSink
 from scanner.auth.session_manager import RuntimeContext
 from scanner.contracts import (
@@ -103,6 +104,9 @@ _SAFE_INCONCLUSIVE_REASON_CODES = frozenset(
         "INPUT_SESSION_UNAVAILABLE",
         "INPUT_UNSAFE_INPUT_LOCATION",
     }
+)
+_OPAQUE_EVIDENCE_REFERENCE = re.compile(
+    r"artifact:[A-Za-z0-9][A-Za-z0-9._-]*"
 )
 
 
@@ -241,8 +245,35 @@ class Executor:
         runtime: RuntimeContext,
         decision: PlanApprovalDecision,
     ) -> ScanResult:
-        result = ScanResult(scan_id=profile.scan_id, findings=[])
+        sensitive_values = runtime.sensitive_values()
+        safe_scan_id = (
+            profile.scan_id
+            if _external_text_is_safe(profile.scan_id, sensitive_values)
+            else REDACTED
+        )
+        result = ScanResult(scan_id=safe_scan_id, findings=[])
         if decision.status is not ApprovalStatus.APPROVED:
+            return result
+        if not all(
+            _external_text_is_safe(value, sensitive_values)
+            for value in (
+                profile.scan_id,
+                graph.scan_id,
+                analysis.scan_id,
+                plan.scan_id,
+                runtime.scan_id,
+                decision.scan_id,
+                plan.plan_id,
+                decision.plan_id,
+            )
+        ):
+            self._report_failure(
+                job_id,
+                safe_scan_id,
+                code="EXECUTION_STEP_INVALID",
+                stage=ScannerStage.EXECUTING,
+                retryable=False,
+            )
             return result
         if (
             decision.scan_id != profile.scan_id
@@ -254,7 +285,7 @@ class Executor:
         ):
             self._report_failure(
                 job_id,
-                profile.scan_id,
+                safe_scan_id,
                 code="EXECUTION_DECISION_INVALID",
                 stage=ScannerStage.EXECUTING,
                 retryable=False,
@@ -265,7 +296,7 @@ class Executor:
         if self._client is None:
             self._report_failure(
                 job_id,
-                profile.scan_id,
+                safe_scan_id,
                 code="EXECUTION_CLIENT_UNAVAILABLE",
                 stage=ScannerStage.EXECUTING,
                 retryable=False,
@@ -287,7 +318,7 @@ class Executor:
             except CancellationRequested:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_CANCELLED",
                     stage=ScannerStage.CANCELED,
                     retryable=False,
@@ -303,7 +334,7 @@ class Executor:
             if step.module_id not in REQUEST_ESTIMATES:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_MODULE_NOT_APPROVED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -313,6 +344,22 @@ class Executor:
                 break
             operation = operations.get(step.target_operation_id)
             candidate = candidates.get(step.candidate_id)
+            if not _step_external_identifiers_are_safe(
+                step=step,
+                operation=operation,
+                candidate=candidate,
+                sensitive_values=sensitive_values,
+            ):
+                self._report_failure(
+                    job_id,
+                    safe_scan_id,
+                    code="EXECUTION_STEP_INVALID",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=None,
+                    module_id=step.module_id,
+                )
+                break
             if not self._execution_step_is_valid(
                 profile=profile,
                 analysis=analysis,
@@ -322,7 +369,7 @@ class Executor:
             ):
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_STEP_INVALID",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -337,7 +384,7 @@ class Executor:
             if not callable(run):
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_MODULE_UNAVAILABLE",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -359,7 +406,7 @@ class Executor:
             except CancellationRequested:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_CANCELLED",
                     stage=ScannerStage.CANCELED,
                     retryable=False,
@@ -370,7 +417,7 @@ class Executor:
             except BudgetExceeded:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_REQUEST_BUDGET_EXCEEDED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -381,7 +428,7 @@ class Executor:
             except PolicyViolation:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_POLICY_DENIED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -391,7 +438,7 @@ class Executor:
                 break
 
             context = ModuleExecutionContext(
-                scan_id=profile.scan_id,
+                scan_id=safe_scan_id,
                 base_url=profile.target.base_url,
                 operation=operation,
                 step=step,
@@ -403,7 +450,7 @@ class Executor:
             except CancellationRequested:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_CANCELLED",
                     stage=ScannerStage.CANCELED,
                     retryable=False,
@@ -414,7 +461,7 @@ class Executor:
             except BudgetExceeded:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_REQUEST_BUDGET_EXCEEDED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -425,7 +472,7 @@ class Executor:
             except PolicyViolation:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_POLICY_DENIED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -436,7 +483,7 @@ class Executor:
             except BindingError:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_BINDING_FAILED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -447,7 +494,7 @@ class Executor:
             except ScannerRequestError:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_REQUEST_FAILED",
                     stage=ScannerStage.EXECUTING,
                     retryable=True,
@@ -458,7 +505,7 @@ class Executor:
             except Exception:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_MODULE_FAILED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -467,10 +514,17 @@ class Executor:
                 )
                 continue
 
-            if not isinstance(outcome, ModuleOutcome):
+            if (
+                not isinstance(outcome, ModuleOutcome)
+                or type(outcome.verdict) is not ModuleVerdict
+                or (
+                    outcome.reason_code is not None
+                    and not isinstance(outcome.reason_code, str)
+                )
+            ):
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_MODULE_FAILED",
                     stage=ScannerStage.EXECUTING,
                     retryable=False,
@@ -483,7 +537,7 @@ class Executor:
                     code="EXECUTION_MODULE_NOT_FOUND",
                     level="INFO",
                     job_id=job_id,
-                    scan_id=profile.scan_id,
+                    scan_id=safe_scan_id,
                     operation_id=operation.operation_id,
                     module_id=step.module_id,
                 )
@@ -497,7 +551,7 @@ class Executor:
                     ),
                     level="WARNING",
                     job_id=job_id,
-                    scan_id=profile.scan_id,
+                    scan_id=safe_scan_id,
                     operation_id=operation.operation_id,
                     module_id=step.module_id,
                 )
@@ -505,7 +559,7 @@ class Executor:
             try:
                 finding = self._verified_finding(
                     job_id=job_id,
-                    scan_id=profile.scan_id,
+                    scan_id=safe_scan_id,
                     operation=operation,
                     module_id=step.module_id,
                     runtime=runtime,
@@ -514,7 +568,7 @@ class Executor:
             except Exception:
                 self._report_failure(
                     job_id,
-                    profile.scan_id,
+                    safe_scan_id,
                     code="EXECUTION_MODULE_FAILED",
                     stage=ScannerStage.VERIFYING,
                     retryable=False,
@@ -526,7 +580,7 @@ class Executor:
                 findings.setdefault(finding.finding_id, finding)
 
         return ScanResult(
-            scan_id=profile.scan_id,
+            scan_id=safe_scan_id,
             findings=sorted(findings.values(), key=lambda finding: finding.finding_id),
         )
 
@@ -585,8 +639,8 @@ class Executor:
         affected: dict[tuple[str, str, str], AffectedField] = {}
         for item in outcome.affected_fields:
             field_path = redactor.redact(item.field_path, sensitive_values)
-            if not isinstance(field_path, str):
-                continue
+            if not isinstance(field_path, str) or field_path != item.field_path:
+                raise ValueError("affected field path is invalid")
             cleaned = AffectedField(
                 location=item.location,
                 field_path=field_path,
@@ -626,7 +680,7 @@ class Executor:
             evidence_ref = self._backend.publish_artifact(envelope)
             if (
                 not isinstance(evidence_ref, str)
-                or not evidence_ref
+                or _OPAQUE_EVIDENCE_REFERENCE.fullmatch(evidence_ref) is None
                 or redactor.redact(evidence_ref, sensitive_values) != evidence_ref
             ):
                 raise ValueError("evidence reference is invalid")
@@ -712,6 +766,36 @@ class Executor:
                 details={},
             )
         )
+
+
+def _external_text_is_safe(
+    value: str,
+    sensitive_values: set[str],
+) -> bool:
+    cleaned = Redactor().redact(value, sensitive_values)
+    return isinstance(cleaned, str) and cleaned == value
+
+
+def _step_external_identifiers_are_safe(
+    *,
+    step: ScanStep,
+    operation: Operation | None,
+    candidate: TestCandidate | None,
+    sensitive_values: set[str],
+) -> bool:
+    values = [step.candidate_id, step.target_operation_id]
+    if operation is not None:
+        values.append(operation.operation_id)
+    if candidate is not None:
+        values.extend(
+            (
+                candidate.candidate_id,
+                candidate.target_operation_id,
+            )
+        )
+    return all(
+        _external_text_is_safe(value, sensitive_values) for value in values
+    )
 
 
 def _finding_id(
