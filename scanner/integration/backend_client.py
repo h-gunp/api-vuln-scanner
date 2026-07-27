@@ -83,6 +83,8 @@ class FakeBackendClient:
         self.progress_events: list[ProgressEvent] = []
         self.approval_decisions: list[PlanApprovalDecision] = []
         self.error_reports: list[ScannerErrorReport] = []
+        self.approval_events: list[ApprovalEvent] = []
+        self.error_events: list[ErrorEvent] = []
 
     def set_artifact(self, ref: str, content: bytes) -> None:
         self._artifacts[ref] = content
@@ -108,8 +110,8 @@ class FakeBackendClient:
         )
 
     def report_approval(self, job_id: str, decision: PlanApprovalDecision) -> None:
-        del job_id
         self.approval_decisions.append(decision)
+        self.approval_events.append(ApprovalEvent(job_id, decision))
 
     def publish_artifact(self, envelope: ArtifactEnvelope) -> str:
         key = (envelope.scan_id, envelope.artifact_type, envelope.sha256)
@@ -120,8 +122,8 @@ class FakeBackendClient:
         return self._artifact_refs[key]
 
     def report_error(self, job_id: str, report: ScannerErrorReport) -> None:
-        del job_id
         self.error_reports.append(report)
+        self.error_events.append(ErrorEvent(job_id, report))
 
     def cancel(self, job_id: str) -> None:
         self._cancelled_jobs.add(job_id)

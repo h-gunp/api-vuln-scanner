@@ -51,6 +51,10 @@ def test_fake_backend_stores_progress_approval_artifacts_and_cancel_state():
     assert backend.progress_events[-1].statistics == {"actors": 1}
     assert backend.approval_decisions[-1].status == ApprovalStatus.APPROVED
     assert backend.error_reports[-1].code == "AUTH_UNAVAILABLE"
+    assert backend.approval_events[-1].job_id == "job-1"
+    assert backend.approval_events[-1].decision == approved_decision
+    assert backend.error_events[-1].job_id == "job-1"
+    assert backend.error_events[-1].report.code == "AUTH_UNAVAILABLE"
 
 
 def test_fake_backend_idempotently_reuses_artifact_ref_for_same_scan_type_and_checksum():

@@ -33,6 +33,23 @@ def test_redactor_removes_values_from_sequences_strings_and_exception_details():
     assert "token-a" not in json.dumps(cleaned)
 
 
+def test_redactor_removes_non_string_runtime_values_and_relative_query_secrets():
+    cleaned = Redactor().redact(
+        {
+            "observed_parameter": 42,
+            "request_target": "/api/a?token=token-a",
+            "status": 200,
+        },
+        sensitive_values={42},
+    )
+
+    rendered = json.dumps(cleaned)
+    assert "42" not in rendered
+    assert "token-a" not in rendered
+    assert cleaned["observed_parameter"] == "[REDACTED]"
+    assert cleaned["status"] == 200
+
+
 def test_artifact_builder_hashes_redacted_canonical_bytes():
     envelope = ArtifactBuilder(Redactor()).build(
         scan_id="scan-001",
@@ -57,6 +74,18 @@ def test_artifact_builder_never_serializes_raw_exception_details():
     )
 
     assert b"private-account-42" not in envelope.content
+
+
+def test_artifact_builder_never_serializes_raw_response_text_by_default():
+    envelope = ArtifactBuilder(Redactor()).build(
+        scan_id="scan-001",
+        artifact_type="evidence",
+        schema_version=None,
+        payload={"response": "private-account-42", "status": 200},
+    )
+
+    assert b"private-account-42" not in envelope.content
+    assert envelope.content == b'{"response":"[REDACTED]","status":200}'
 
 
 def test_in_memory_audit_sink_stores_redacted_event_details():
@@ -99,3 +128,23 @@ def test_in_memory_audit_sink_never_stores_raw_exception_or_response_details():
     rendered = json.dumps(sink.events[-1].details)
     assert "private-account-42" not in rendered
     assert sink.events[-1].details["status"] == 502
+
+
+def test_in_memory_audit_sink_removes_numeric_runtime_values_but_keeps_counts():
+    sink = InMemoryAuditSink()
+
+    sink.emit(
+        AuditEvent(
+            code="DISCOVERY_PROGRESS",
+            level="INFO",
+            job_id="job-001",
+            scan_id="scan-001",
+            operation_id=None,
+            module_id=None,
+            details={"object_id": 42, "operations": 3, "status": 200},
+        )
+    )
+
+    assert sink.events[-1].details["object_id"] == "[REDACTED]"
+    assert sink.events[-1].details["operations"] == 3
+    assert sink.events[-1].details["status"] == 200

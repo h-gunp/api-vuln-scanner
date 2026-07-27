@@ -25,6 +25,13 @@ SENSITIVE_KEYS = frozenset(
         "pin",
         "cvv",
         "session",
+        "response",
+        "response_body",
+        "body",
+        "object_id",
+        "account_id",
+        "parameter_value",
+        "observed_value",
     }
 )
 
@@ -42,32 +49,42 @@ class ArtifactEnvelope:
 class Redactor:
     """Removes credential-bearing keys and supplied runtime values."""
 
-    def redact(self, value: Any, sensitive_values: Iterable[str] = ()) -> Any:
-        values = tuple(
+    def redact(self, value: Any, sensitive_values: Iterable[Any] = ()) -> Any:
+        values = tuple(sensitive_values)
+        string_values = tuple(
             sorted(
-                {str(item) for item in sensitive_values if str(item)},
+                {item for item in values if isinstance(item, str) and item},
                 key=len,
                 reverse=True,
             )
         )
-        return self._redact_value(value, values)
+        return self._redact_value(value, values, string_values)
 
-    def _redact_value(self, value: Any, sensitive_values: tuple[str, ...]) -> Any:
+    def _redact_value(
+        self,
+        value: Any,
+        sensitive_values: tuple[Any, ...],
+        string_values: tuple[str, ...],
+    ) -> Any:
         if isinstance(value, Mapping):
             return {
                 str(key): (
                     REDACTED
                     if str(key).casefold() in SENSITIVE_KEYS
-                    else self._redact_value(item, sensitive_values)
+                    else self._redact_value(item, sensitive_values, string_values)
                 )
                 for key, item in value.items()
             }
         if isinstance(value, (list, tuple, set, frozenset)):
-            return [self._redact_value(item, sensitive_values) for item in value]
+            return [
+                self._redact_value(item, sensitive_values, string_values) for item in value
+            ]
         if isinstance(value, BaseException):
             return REDACTED
         if isinstance(value, str):
-            return self._redact_string(value, sensitive_values)
+            return self._redact_string(value, string_values)
+        if any(type(value) is type(item) and value == item for item in sensitive_values):
+            return REDACTED
         return value
 
     def _redact_string(self, value: str, sensitive_values: tuple[str, ...]) -> str:
@@ -78,7 +95,7 @@ class Redactor:
 
     def _redact_url_query(self, value: str) -> str:
         parsed = urlsplit(value)
-        if not parsed.scheme or not parsed.netloc or not parsed.query:
+        if not parsed.query:
             return value
         query = [
             (key, REDACTED if key.casefold() in SENSITIVE_KEYS else item)

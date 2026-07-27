@@ -8,6 +8,23 @@ from typing import Any, Mapping, Protocol
 from scanner.artifacts import Redactor
 
 
+SAFE_NUMERIC_DETAIL_KEYS = frozenset(
+    {
+        "actors",
+        "attempt",
+        "count",
+        "counts",
+        "findings",
+        "operations",
+        "progress",
+        "requests_used",
+        "retry_count",
+        "status",
+        "status_code",
+    }
+)
+
+
 @dataclass(frozen=True)
 class AuditEvent:
     code: str
@@ -30,18 +47,22 @@ class InMemoryAuditSink:
 
     def emit(self, event: AuditEvent) -> None:
         self.events.append(
-            replace(event, details=self._remove_textual_details(event.details))
+            replace(event, details=self._remove_runtime_details(event.details))
         )
 
-    def _remove_textual_details(self, value: Any) -> Any:
+    def _remove_runtime_details(self, value: Any, allow_numeric: bool = False) -> Any:
         redacted = self._redactor.redact(value)
         if isinstance(redacted, Mapping):
             return {
-                str(key): self._remove_textual_details(item)
+                str(key): self._remove_runtime_details(
+                    item, str(key).casefold() in SAFE_NUMERIC_DETAIL_KEYS
+                )
                 for key, item in redacted.items()
             }
         if isinstance(redacted, (list, tuple, set, frozenset)):
-            return [self._remove_textual_details(item) for item in redacted]
+            return [self._remove_runtime_details(item, allow_numeric) for item in redacted]
         if isinstance(redacted, (str, BaseException)):
+            return "[REDACTED]"
+        if isinstance(redacted, (int, float, bool)) and not allow_numeric:
             return "[REDACTED]"
         return redacted
