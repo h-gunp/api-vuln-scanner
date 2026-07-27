@@ -34,7 +34,12 @@ class TargetConfig(StrictModel):
     @classmethod
     def require_http_url(cls, value: str) -> str:
         parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
             raise ValueError("base_url must be an HTTP(S) URL")
         return value
 

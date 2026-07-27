@@ -85,6 +85,13 @@ def test_target_profile_rejects_invalid_contract_values(path, value):
         TargetProfile.model_validate(payload)
 
 
+def test_target_profile_rejects_base_url_with_embedded_credentials():
+    payload = target_profile_payload()
+    payload["target"]["base_url"] = "https://user:password@example.test"
+    with pytest.raises(ValidationError):
+        TargetProfile.model_validate(payload)
+
+
 def test_target_profile_rejects_extra_fields():
     payload = target_profile_payload()
     payload["unexpected"] = True
