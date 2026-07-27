@@ -404,3 +404,59 @@ def test_automatic_cookie_state_does_not_cross_login_requests(profile: TargetPro
         )
 
     assert received_cookies == [None, None]
+
+
+def test_login_snapshot_redacts_custom_token_in_final_redirect_url(profile: TargetProfile):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                302,
+                headers={"Location": "/api/login?custom_session=token-a"},
+                request=request,
+            )
+        return httpx.Response(200, json={"custom_session": "token-a"}, request=request)
+
+    client, _ = make_client(profile, handler)
+    snapshot = client.request(
+        "POST",
+        "http://vuln-bank.local/api/login",
+        is_login=True,
+        login_response_consumer=lambda response: response.json(),
+    )
+
+    assert snapshot.url == "[REDACTED]"
+    assert "token-a" not in repr(snapshot)
+
+
+def test_login_redirect_forwards_handshake_cookie_only_within_logical_request(
+    profile: TargetProfile,
+):
+    received_cookies: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received_cookies.append(request.headers.get("cookie"))
+        if len(received_cookies) == 1:
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "/api/login",
+                    "Set-Cookie": "handshake=required-cookie; HttpOnly",
+                },
+                request=request,
+            )
+        return httpx.Response(200, json={"access_token": "token-a"}, request=request)
+
+    client, _ = make_client(profile, handler)
+    snapshot = client.request(
+        "POST",
+        "http://vuln-bank.local/api/login",
+        is_login=True,
+        login_response_consumer=lambda response: response.json(),
+    )
+
+    assert snapshot.is_success is True
+    assert received_cookies == [None, "handshake=required-cookie"]

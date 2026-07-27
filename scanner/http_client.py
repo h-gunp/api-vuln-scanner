@@ -91,45 +91,45 @@ class SafeHttpClient:
         current_url = url
         current_params = params
         values = sensitive_values if sensitive_values is not None else set()
+        self._client.cookies.clear()
+        try:
+            while True:
+                try:
+                    self._validate_headers(headers)
+                    self._policy.authorize(
+                        method,
+                        current_url,
+                        module_id=module_id,
+                        is_login=is_login,
+                        is_state_change=is_state_change,
+                    )
+                except PolicyViolation:
+                    self._emit("POLICY_DENIED")
+                    raise
+                self._budget.reserve()
+                try:
+                    response = self._client.request(
+                        method,
+                        current_url,
+                        headers=headers,
+                        params=current_params,
+                        json=json_body,
+                    )
+                except httpx.HTTPError:
+                    self._emit("REQUEST_FAILED")
+                    raise ScannerRequestError("scanner request failed") from None
 
-        while True:
-            try:
-                self._validate_headers(headers)
-                self._policy.authorize(
-                    method,
-                    current_url,
-                    module_id=module_id,
-                    is_login=is_login,
-                    is_state_change=is_state_change,
-                )
-            except PolicyViolation:
-                self._emit("POLICY_DENIED")
-                raise
-            self._budget.reserve()
+                if response.is_redirect and response.headers.get("location"):
+                    current_url = urljoin(str(response.url), response.headers["location"])
+                    current_params = None
+                    continue
+
+                if login_response_consumer is not None and not response.is_redirect:
+                    login_response_consumer(response)
+                    login_response_consumer = None
+                return self._snapshot(response, values, hide_login_response=is_login)
+        finally:
             self._client.cookies.clear()
-            try:
-                response = self._client.request(
-                    method,
-                    current_url,
-                    headers=headers,
-                    params=current_params,
-                    json=json_body,
-                )
-            except httpx.HTTPError:
-                self._emit("REQUEST_FAILED")
-                raise ScannerRequestError("scanner request failed") from None
-            finally:
-                self._client.cookies.clear()
-
-            if response.is_redirect and response.headers.get("location"):
-                current_url = urljoin(str(response.url), response.headers["location"])
-                current_params = None
-                continue
-
-            if login_response_consumer is not None and not response.is_redirect:
-                login_response_consumer(response)
-                login_response_consumer = None
-            return self._snapshot(response, values, hide_login_response=is_login)
 
     def _snapshot(
         self,
@@ -156,7 +156,9 @@ class SafeHttpClient:
             headers=clean_headers,
             cookies={},
             json_body=self._redactor.redact(body, sensitive_values),
-            url=self._redactor.redact(str(response.url), sensitive_values),
+            url="[REDACTED]"
+            if hide_login_response
+            else self._redactor.redact(str(response.url), sensitive_values),
         )
 
     @staticmethod

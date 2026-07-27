@@ -196,6 +196,23 @@ def test_authenticate_exception_has_no_raw_context_cause_or_traceback_values():
     assert "token-a" not in rendered
 
 
+def test_authenticate_traceback_frame_locals_have_no_runtime_values():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"user-a pw-a token-a raw-response")
+
+    profile, manager, _ = make_manager(handler)
+
+    with pytest.raises(AuthenticationError) as error:
+        manager.authenticate(profile)
+
+    frame = error.value.__traceback__
+    while frame is not None:
+        rendered_locals = repr(frame.tb_frame.f_locals)
+        for value in ("user-a", "pw-a", "token-a", "raw-response"):
+            assert value not in rendered_locals
+        frame = frame.tb_next
+
+
 def test_authenticate_uses_final_redirect_login_response():
     requests = 0
 

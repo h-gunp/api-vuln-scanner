@@ -137,8 +137,13 @@ class SessionManager:
         self._http_client = http_client
 
     def authenticate(self, profile: TargetProfile) -> RuntimeContext:
+        runtime = self._authenticate_runtime(profile)
+        if runtime is None:
+            raise AuthenticationError("runtime authentication failed")
+        return runtime
+
+    def _authenticate_runtime(self, profile: TargetProfile) -> RuntimeContext | None:
         runtime = RuntimeContext(scan_id=profile.scan_id)
-        failed = False
         try:
             for actor in profile.authentication.actors:
                 username = self._environment_value(actor.username_env)
@@ -148,9 +153,7 @@ class SessionManager:
                     profile, actor.actor_id, username, password
                 )
         except Exception:
-            failed = True
-        if failed:
-            raise AuthenticationError("runtime authentication failed")
+            return None
         return runtime
 
     def collect_response(
