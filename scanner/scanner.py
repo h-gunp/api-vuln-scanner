@@ -63,6 +63,7 @@ _HEX_SEGMENT = re.compile(r"^[0-9a-fA-F]{16,}$")
 _LIVE_FIELD_COMPONENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NUMERIC_SEGMENT = re.compile(r"^\d+$")
 _PATH_PARAMETER = re.compile(r"^\{([^{}\/]+)\}$")
+_MIN_RUNTIME_COMPONENT_LENGTH = 4
 _DISCOVERY_MODULE_IDS = {
     PolicyModule.AUTHZ: "BOLA-001",
     PolicyModule.INPUT_VALIDATION: "INPUT-001",
@@ -305,6 +306,7 @@ class Scanner:
             client,
             cancellation,
         )
+        graph = self._sanitize_authoritative_structure(graph, runtime)
         self._check_cancellation(request, cancellation)
         available_object_types = tuple(
             sorted(
@@ -628,11 +630,13 @@ class Scanner:
     def _normalize_operation_paths(
         cls,
         graph: NormalizedApiGraph,
+        runtime_components: set[str] | frozenset[str] = frozenset(),
     ) -> NormalizedApiGraph:
         normalized: dict[tuple[str, str], Operation] = {}
         for operation in graph.operations:
             path_template, generated_parameters = cls._generalize_path_template(
-                operation.path_template
+                operation.path_template,
+                runtime_components,
             )
             inputs = {
                 (input_field.location, input_field.field_path): input_field
@@ -698,6 +702,7 @@ class Scanner:
     def _generalize_path_template(
         cls,
         path_template: str,
+        runtime_components: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[str, tuple[str, ...]]:
         used_names = {
             match.group(1)
@@ -708,7 +713,10 @@ class Scanner:
         segments: list[str] = []
         next_index = 1
         for segment in path_template.split("/"):
-            if not cls._is_value_path_segment(segment):
+            if (
+                not cls._is_value_path_segment(segment)
+                and segment not in runtime_components
+            ):
                 segments.append(segment)
                 continue
             while True:
@@ -737,6 +745,58 @@ class Scanner:
         return str(parsed) == segment.casefold()
 
     @classmethod
+    def _sanitize_authoritative_structure(
+        cls,
+        graph: NormalizedApiGraph,
+        runtime: RuntimeContext,
+    ) -> NormalizedApiGraph:
+        runtime_components = cls._untrusted_runtime_components(runtime)
+        operations = [
+            operation.model_copy(
+                update={
+                    "inputs": [
+                        field
+                        for field in operation.inputs
+                        if not cls._field_path_contains_component(
+                            field.field_path,
+                            runtime_components,
+                        )
+                    ],
+                    "outputs": [
+                        field
+                        for field in operation.outputs
+                        if not cls._field_path_contains_component(
+                            field.field_path,
+                            runtime_components,
+                        )
+                    ],
+                }
+            )
+            for operation in graph.operations
+        ]
+        sanitized = NormalizedApiGraph(
+            scan_id=graph.scan_id,
+            operations=operations,
+        )
+        return cls._normalize_operation_paths(
+            sanitized,
+            runtime_components,
+        )
+
+    @staticmethod
+    def _field_path_contains_component(
+        field_path: str,
+        runtime_components: set[str] | frozenset[str],
+    ) -> bool:
+        for raw_component in field_path.split("."):
+            component = raw_component
+            while component.endswith("[]"):
+                component = component[:-2]
+            if component in runtime_components:
+                return True
+        return False
+
+    @classmethod
     def _is_safe_live_output(
         cls,
         output: OutputField,
@@ -756,28 +816,11 @@ class Scanner:
 
     @staticmethod
     def _untrusted_runtime_components(runtime: RuntimeContext) -> set[str]:
-        values: set[str] = set()
-        values.update(
+        return {
             value
-            for credential in runtime.credentials
-            if len(value := credential.reveal()) > 3
-        )
-        for session in runtime.sessions.values():
-            if session.token is not None:
-                token = session.token.reveal()
-                if len(token) > 3:
-                    values.add(token)
-            values.update(
-                value
-                for cookie in session.cookies.values()
-                if len(value := cookie.reveal()) > 3
-            )
-        for actor_objects in runtime.object_ids.values():
-            for identifiers in actor_objects.values():
-                values.update(identifier.reveal() for identifier in identifiers)
-        for examples in runtime.parameter_examples.values():
-            values.update(example.reveal() for example in examples)
-        return values
+            for value in runtime.sensitive_values()
+            if len(value) >= _MIN_RUNTIME_COMPONENT_LENGTH
+        }
 
     @staticmethod
     def _is_list_operation(

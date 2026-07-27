@@ -823,6 +823,188 @@ def test_openapi_paths_generalize_value_segments_without_credential_substrings(
     assert b'"field_path":"id"' in backend.published[0].content
 
 
+def test_collected_object_id_generalizes_matching_authoritative_path_segment() -> None:
+    backend = RecordingBackend()
+    runtime_account_id = "account-a-secret"
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/accounts": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "account collection",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "items": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "account_id": {
+                                                            "type": "string"
+                                                        }
+                                                    },
+                                                },
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            },
+            f"/api/accounts/{runtime_account_id}": {
+                "get": {
+                    "responses": {
+                        "200": {"description": "concrete account path"}
+                    }
+                }
+            },
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            username = json.loads(request.content)["username"]
+            return httpx.Response(
+                200,
+                json={"access_token": f"token-{username[-1]}"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=document, request=request)
+        if request.url.path == "/api/accounts":
+            return httpx.Response(
+                200,
+                json={"items": [{"account_id": runtime_account_id}]},
+                request=request,
+            )
+        return httpx.Response(200, json={}, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload(sources=["openapi"])))
+    )
+
+    operations = {
+        operation.path_template: operation for operation in outcome.graph.operations
+    }
+    assert set(operations) == {"/api/accounts", "/api/accounts/{id}"}
+    generalized = operations["/api/accounts/{id}"]
+    assert generalized.operation_id == "GET:/api/accounts/{id}"
+    assert {
+        (field.location, field.field_path) for field in generalized.inputs
+    } == {("path", "id")}
+    rendered = (
+        outcome.graph.model_dump_json()
+        + backend.published[0].content.decode()
+        + repr(backend.__dict__)
+        + repr(scanner)
+    )
+    assert runtime_account_id not in rendered
+
+
+def test_authoritative_fields_matching_session_token_are_dropped() -> None:
+    backend = RecordingBackend()
+    session_token = "opaque-session-field"
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/accounts": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": session_token,
+                            "in": "query",
+                            "schema": {"type": "string"},
+                        },
+                        {
+                            "name": "id",
+                            "in": "query",
+                            "schema": {"type": "string"},
+                        },
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "authoritative fields",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            session_token: {"type": "string"},
+                                            "id": {"type": "string"},
+                                            "api_status": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"access_token": session_token},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=document, request=request)
+        return httpx.Response(
+            200,
+            json={"id": "ordinary-id", "api_status": "ok"},
+            request=request,
+        )
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload(sources=["openapi"])))
+    )
+
+    operation = outcome.graph.operations[0]
+    assert {field.field_path for field in operation.inputs} == {"id"}
+    assert {field.field_path for field in operation.outputs} == {
+        "api_status",
+        "id",
+    }
+    artifact_graph = json.loads(backend.published[0].content)
+    artifact_operation = artifact_graph["operations"][0]
+    assert {field["field_path"] for field in artifact_operation["inputs"]} == {
+        "id"
+    }
+    assert {field["field_path"] for field in artifact_operation["outputs"]} == {
+        "api_status",
+        "id",
+    }
+    rendered = (
+        outcome.graph.model_dump_json()
+        + backend.published[0].content.decode()
+        + repr(backend.__dict__)
+        + repr(scanner)
+    )
+    assert session_token not in rendered
+
+
 def test_live_output_union_keeps_names_and_rejects_dynamic_mapping_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
