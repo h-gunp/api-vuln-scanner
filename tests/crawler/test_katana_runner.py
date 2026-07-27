@@ -9,7 +9,12 @@ import pytest
 from scanner.audit import InMemoryAuditSink
 from scanner.auth.session_manager import ActorSession
 from scanner.contracts import TargetProfile
-from scanner.crawler.katana_runner import KatanaError, KatanaRunner
+from scanner.crawler.katana_runner import (
+    KatanaError,
+    KatanaRecord,
+    KatanaRunner,
+    KatanaRunResult,
+)
 from scanner.integration.backend_client import FakeBackendClient
 from scanner.policy import (
     BudgetExceeded,
@@ -60,6 +65,21 @@ def target_profile(*, allowed_methods: list[str] | None = None) -> TargetProfile
             },
         }
     )
+
+
+def test_katana_runtime_records_hide_raw_urls_from_repr_and_str():
+    raw_identifier = "acct-runtime-only-4821"
+    record = KatanaRecord(
+        "GET",
+        f"http://vuln-bank.local/api/accounts/{raw_identifier}?view=private",
+    )
+    result = KatanaRunResult(records=(record,), requests_made=1)
+
+    assert repr(record) == "KatanaRecord(method='GET')"
+    assert str(record) == "KatanaRecord(method='GET')"
+    assert repr(result) == "KatanaRunResult(requests_made=1)"
+    assert str(result) == "KatanaRunResult(requests_made=1)"
+    assert raw_identifier not in repr(record) + str(record) + repr(result) + str(result)
 
 
 class FakeProcess:

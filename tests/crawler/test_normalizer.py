@@ -203,8 +203,9 @@ def test_normalize_openapi_keeps_only_sorted_get_structure_and_runtime_metadata(
 
 
 def test_merge_katana_records_deduplicates_templates_and_generalizes_identifiers():
+    runtime = RuntimeContext(scan_id="scan-001")
     graph = normalize_openapi(
-        "scan-001", openapi_document(), RuntimeContext(scan_id="scan-001")
+        "scan-001", openapi_document(), runtime
     )
 
     merged = merge_katana_records(
@@ -221,6 +222,7 @@ def test_merge_katana_records_deduplicates_templates_and_generalizes_identifiers
             ),
             KatanaRecord("POST", "http://vuln-bank.local/api/transfer"),
         ],
+        runtime,
     )
 
     assert [operation.operation_id for operation in merged.operations] == [
@@ -232,6 +234,7 @@ def test_merge_katana_records_deduplicates_templates_and_generalizes_identifiers
     assert [field.model_dump() for field in merged.operations[-1].inputs] == [
         {"location": "path", "field_path": "id", "type": "string"},
         {"location": "path", "field_path": "id_2", "type": "string"},
+        {"location": "query", "field_path": "view", "type": "string"},
     ]
 
 
@@ -260,10 +263,11 @@ def test_merge_katana_records_generalizes_uuid_versions_6_7_and_8():
         "01890abc-def0-7abc-8def-0123456789ab",
         "01234567-89ab-8cde-8f01-23456789abcd",
     ]
+    runtime = RuntimeContext(scan_id="scan-001")
     graph = normalize_openapi(
         "scan-001",
         {"openapi": "3.1.0", "paths": {}},
-        RuntimeContext(scan_id="scan-001"),
+        runtime,
     )
 
     merged = merge_katana_records(
@@ -272,6 +276,7 @@ def test_merge_katana_records_generalizes_uuid_versions_6_7_and_8():
             KatanaRecord("GET", f"http://vuln-bank.local/api/v{version}/{raw_id}")
             for version, raw_id in zip((6, 7, 8), raw_ids, strict=True)
         ],
+        runtime,
     )
 
     assert [operation.path_template for operation in merged.operations] == [
@@ -281,6 +286,149 @@ def test_merge_katana_records_generalizes_uuid_versions_6_7_and_8():
     ]
     rendered = merged.model_dump_json()
     assert all(raw_id not in rendered for raw_id in raw_ids)
+
+
+def test_katana_crawl_only_query_becomes_input_runtime_example_without_graph_value():
+    runtime = RuntimeContext(scan_id="scan-001")
+    graph = normalize_openapi(
+        "scan-001",
+        {"openapi": "3.1.0", "paths": {}},
+        runtime,
+    )
+
+    merged = merge_katana_records(
+        graph,
+        [
+            KatanaRecord(
+                "GET",
+                "http://vuln-bank.local/api/search?filter=active&page=2",
+            )
+        ],
+        runtime,
+    )
+
+    operation = merged.operations[0]
+    assert operation.operation_id == "GET:/api/search"
+    assert [field.model_dump() for field in operation.inputs] == [
+        {"location": "query", "field_path": "filter", "type": "string"},
+        {"location": "query", "field_path": "page", "type": "string"},
+    ]
+    assert runtime.observed_parameter_examples[
+        ("GET:/api/search", "query", "filter")
+    ] == {"active"}
+    assert runtime.parameter_examples[
+        ("GET:/api/search", "query", "page")
+    ] == {"2"}
+    rendered_graph = repr(merged) + merged.model_dump_json()
+    assert "active" not in rendered_graph
+    assert "page=2" not in rendered_graph
+
+
+def test_katana_query_augments_matching_openapi_operation_for_input_module():
+    runtime = RuntimeContext(scan_id="scan-001")
+    graph = normalize_openapi(
+        "scan-001",
+        openapi_document(),
+        runtime,
+    )
+
+    merged = merge_katana_records(
+        graph,
+        [
+            KatanaRecord(
+                "GET",
+                "http://vuln-bank.local/api/accounts/123?include=transactions",
+            )
+        ],
+        runtime,
+    )
+
+    operation = next(
+        item
+        for item in merged.operations
+        if item.operation_id == "GET:/api/accounts/{account_id}"
+    )
+    assert ("query", "include", "string") in {
+        (field.location, field.field_path, field.type)
+        for field in operation.inputs
+    }
+    assert runtime.observed_parameter_examples[
+        ("GET:/api/accounts/{account_id}", "query", "include")
+    ] == {"transactions"}
+    assert runtime.parameter_examples[
+        ("GET:/api/accounts/{account_id}", "query", "include")
+    ] == {"transactions"}
+
+
+def test_katana_observation_preserves_existing_openapi_query_type():
+    runtime = RuntimeContext(scan_id="scan-001")
+    graph = normalize_openapi(
+        "scan-001",
+        openapi_document(),
+        runtime,
+    )
+
+    merged = merge_katana_records(
+        graph,
+        [
+            KatanaRecord(
+                "GET",
+                "http://vuln-bank.local/api/accounts?page=2",
+            )
+        ],
+        runtime,
+    )
+
+    operation = next(
+        item
+        for item in merged.operations
+        if item.operation_id == "GET:/api/accounts"
+    )
+    page = next(
+        field
+        for field in operation.inputs
+        if (field.location, field.field_path) == ("query", "page")
+    )
+    assert page.type == "integer"
+    assert runtime.observed_parameter_examples[
+        ("GET:/api/accounts", "query", "page")
+    ] == {"2"}
+
+
+def test_katana_query_names_are_safe_deduplicated_and_stably_sorted():
+    runtime = RuntimeContext(scan_id="scan-001")
+    graph = normalize_openapi(
+        "scan-001",
+        {"openapi": "3.1.0", "paths": {}},
+        runtime,
+    )
+
+    merged = merge_katana_records(
+        graph,
+        [
+            KatanaRecord(
+                "GET",
+                "http://vuln-bank.local/api/search?z=2&=blank&bad%0Aname=x&a=1",
+            ),
+            KatanaRecord(
+                "GET",
+                "http://vuln-bank.local/api/search?a=3&z=2",
+            ),
+        ],
+        runtime,
+    )
+
+    assert [
+        (field.location, field.field_path)
+        for field in merged.operations[0].inputs
+    ] == [("query", "a"), ("query", "z")]
+    assert runtime.observed_parameter_examples[
+        ("GET:/api/search", "query", "a")
+    ] == {"1", "3"}
+    assert not any(
+        field_path in {"", "bad\nname"}
+        for _, _, field_path in runtime.observed_parameter_examples
+    )
 
 
 def test_operation_parameter_override_replaces_required_and_example_metadata():

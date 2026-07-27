@@ -51,11 +51,16 @@ def profile() -> TargetProfile:
 
 
 def make_client(
-    profile: TargetProfile, handler, *, backend: FakeBackendClient | None = None
+    profile: TargetProfile,
+    handler,
+    *,
+    backend: FakeBackendClient | None = None,
+    max_requests: int = 3,
+    audit_sink: InMemoryAuditSink | None = None,
 ) -> tuple[SafeHttpClient, RequestBudget]:
     backend = backend or FakeBackendClient()
     budget = RequestBudget(
-        max_requests=3,
+        max_requests=max_requests,
         requests_per_second=100,
         cancellation_guard=CancellationGuard(backend),
         job_id="job-001",
@@ -66,7 +71,7 @@ def make_client(
             budget=budget,
             transport=httpx.MockTransport(handler),
             redactor=Redactor(),
-            audit_sink=InMemoryAuditSink(),
+            audit_sink=audit_sink or InMemoryAuditSink(),
         ),
         budget,
     )
@@ -176,6 +181,40 @@ def test_allowed_get_reaches_transport_once_and_consumes_budget(profile: TargetP
     assert snapshot.json_body == {"balance": 10}
 
 
+def test_snapshot_repr_and_str_expose_only_safe_status(profile: TargetProfile):
+    raw_identifier = "acct-runtime-only-4821"
+    client, _ = make_client(
+        profile,
+        lambda request: httpx.Response(
+            200,
+            headers={"X-Object": raw_identifier},
+            json={"account_id": raw_identifier},
+            request=request,
+        ),
+    )
+
+    snapshot = client.request(
+        "GET",
+        f"http://vuln-bank.local/api/accounts?account_id={raw_identifier}",
+        module_id="BOLA-001",
+    )
+
+    rendered = repr(snapshot) + str(snapshot)
+    assert rendered == (
+        "ResponseSnapshot(status_code=200)"
+        "ResponseSnapshot(status_code=200)"
+    )
+    assert raw_identifier not in rendered
+    for hidden_name in (
+        "headers",
+        "cookies",
+        "json_body",
+        "url",
+        "runtime_json_body",
+    ):
+        assert hidden_name not in rendered
+
+
 def test_preflight_authorizes_without_budget_or_transport(profile: TargetProfile):
     calls = []
     client, budget = make_client(
@@ -244,6 +283,104 @@ def test_allowed_same_origin_redirect_is_reauthorized_and_consumes_second_reques
     assert calls == ["http://vuln-bank.local/api/start", "http://vuln-bank.local/api/final"]
     assert budget.requests_used == 2
     assert snapshot.url == "http://vuln-bank.local/api/final"
+
+
+def test_same_url_redirect_loop_stops_before_repeated_transport(profile: TargetProfile):
+    raw_identifier = "acct-loop-runtime-4821"
+    calls: list[str] = []
+    audit = InMemoryAuditSink()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            302,
+            headers={
+                "Location": f"/api/start?account_id={raw_identifier}",
+            },
+            request=request,
+        )
+
+    client, budget = make_client(profile, handler, audit_sink=audit)
+
+    with pytest.raises(ScannerRequestError) as error:
+        client.request(
+            "GET",
+            f"http://vuln-bank.local/api/start?account_id={raw_identifier}",
+            module_id="BOLA-001",
+        )
+
+    assert calls == [
+        f"http://vuln-bank.local/api/start?account_id={raw_identifier}"
+    ]
+    assert budget.requests_used == 1
+    assert [event.code for event in audit.events] == ["REDIRECT_LOOP"]
+    rendered = repr(error.value) + repr(audit.events)
+    assert raw_identifier not in rendered
+    assert "http://vuln-bank.local" not in rendered
+
+
+def test_multi_url_redirect_loop_is_bounded_before_third_transport(
+    profile: TargetProfile,
+):
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        destination = "/api/two" if request.url.path == "/api/one" else "/api/one"
+        return httpx.Response(
+            302,
+            headers={"Location": destination},
+            request=request,
+        )
+
+    client, budget = make_client(profile, handler)
+
+    with pytest.raises(ScannerRequestError, match="redirect loop"):
+        client.request(
+            "GET",
+            "http://vuln-bank.local/api/one",
+            module_id="BOLA-001",
+        )
+
+    assert calls == ["/api/one", "/api/two"]
+    assert budget.requests_used == 2
+
+
+def test_redirect_chain_has_explicit_three_hop_limit(profile: TargetProfile):
+    calls: list[str] = []
+    audit = InMemoryAuditSink()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        next_index = int(request.url.path.rsplit("/", 1)[-1]) + 1
+        return httpx.Response(
+            302,
+            headers={"Location": f"/api/chain/{next_index}"},
+            request=request,
+        )
+
+    client, budget = make_client(
+        profile,
+        handler,
+        max_requests=10,
+        audit_sink=audit,
+    )
+
+    with pytest.raises(ScannerRequestError, match="redirect limit"):
+        client.request(
+            "GET",
+            "http://vuln-bank.local/api/chain/0",
+            module_id="BOLA-001",
+        )
+
+    assert calls == [
+        "/api/chain/0",
+        "/api/chain/1",
+        "/api/chain/2",
+        "/api/chain/3",
+    ]
+    assert budget.requests_used == 4
+    assert [event.code for event in audit.events] == ["REDIRECT_LIMIT"]
 
 
 def test_redirect_following_can_be_disabled_for_exactly_one_transport(

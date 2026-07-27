@@ -309,7 +309,7 @@ class Scanner:
         )
         graph = normalize_openapi(request.scan_id, openapi_document, runtime)
         graph = self._filter_graph(graph, profile, policy, module_id)
-        graph = merge_katana_records(graph, katana_records)
+        graph = merge_katana_records(graph, katana_records, runtime)
         graph = self._normalize_operation_paths(graph)
         graph = self._filter_graph(graph, profile, policy, module_id)
 

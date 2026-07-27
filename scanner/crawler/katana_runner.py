@@ -8,7 +8,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -33,12 +33,12 @@ class _HeaderCleanupError(Exception):
 @dataclass(frozen=True)
 class KatanaRecord:
     method: str
-    url: str
+    url: str = field(repr=False)
 
 
 @dataclass(frozen=True)
 class KatanaRunResult:
-    records: tuple[KatanaRecord, ...]
+    records: tuple[KatanaRecord, ...] = field(repr=False)
     requests_made: int
 
 

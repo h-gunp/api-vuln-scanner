@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 from scanner.auth.session_manager import RuntimeContext, _RuntimeSecret
@@ -23,6 +23,7 @@ _HTTP_METHODS = frozenset(
 _HEX_SEGMENT = re.compile(r"^[0-9a-fA-F]{16,}$")
 _NUMERIC_SEGMENT = re.compile(r"^\d+$")
 _PATH_PARAMETER = re.compile(r"^\{[^{}\/]+\}$")
+_SAFE_QUERY_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,127}$")
 _SCHEMA_TYPES = frozenset(
     {"string", "integer", "number", "boolean", "object", "array"}
 )
@@ -91,38 +92,78 @@ def normalize_openapi(
 def merge_katana_records(
     graph: NormalizedApiGraph,
     records: Iterable[KatanaRecord],
+    runtime: RuntimeContext,
 ) -> NormalizedApiGraph:
-    """Add GET records that do not match an existing OpenAPI path template."""
+    """Merge GET crawl structure and retain observed query values in memory."""
+
+    if runtime.scan_id != graph.scan_id:
+        raise ValueError("runtime scan_id does not match graph scan_id")
 
     operations = list(graph.operations)
     for record in records:
         if record.method.upper() != "GET":
             continue
-        path = _safe_record_path(record.url)
-        if path is None or any(
-            _template_matches(operation.path_template, path)
-            for operation in operations
+        parsed_record = _safe_record(record.url)
+        if parsed_record is None:
+            continue
+        path, observed_query = parsed_record
+        target_indices = [
+            index
+            for index, operation in enumerate(operations)
             if operation.method == "GET"
-        ):
-            continue
-        path_template, parameter_names = _generalize_path(path)
-        if any(
-            operation.method == "GET" and operation.path_template == path_template
-            for operation in operations
-        ):
-            continue
-        operations.append(
-            Operation(
-                operation_id=f"GET:{path_template}",
-                method="GET",
-                path_template=path_template,
-                inputs=[
-                    InputField(location="path", field_path=name, type="string")
-                    for name in parameter_names
-                ],
-                outputs=[],
+            and _template_matches(operation.path_template, path)
+        ]
+        if not target_indices:
+            path_template, parameter_names = _generalize_path(path)
+            existing_index = next(
+                (
+                    index
+                    for index, operation in enumerate(operations)
+                    if operation.method == "GET"
+                    and operation.path_template == path_template
+                ),
+                None,
             )
-        )
+            if existing_index is None:
+                operations.append(
+                    Operation(
+                        operation_id=f"GET:{path_template}",
+                        method="GET",
+                        path_template=path_template,
+                        inputs=[
+                            InputField(
+                                location="path",
+                                field_path=name,
+                                type="string",
+                            )
+                            for name in parameter_names
+                        ],
+                        outputs=[],
+                    )
+                )
+                target_indices = [len(operations) - 1]
+            else:
+                target_indices = [existing_index]
+
+        for index in target_indices:
+            operation = operations[index]
+            query_inputs = [
+                InputField(location="query", field_path=name, type="string")
+                for name in observed_query
+            ]
+            operations[index] = operation.model_copy(
+                update={
+                    "inputs": sorted(
+                        _deduplicate_inputs([*query_inputs, *operation.inputs]),
+                        key=lambda field: (field.location, field.field_path),
+                    )
+                }
+            )
+            _store_observed_query(
+                runtime,
+                operation.operation_id,
+                observed_query,
+            )
 
     operations.sort(key=lambda operation: (operation.path_template, operation.method))
     return NormalizedApiGraph(
@@ -429,14 +470,44 @@ def _deduplicate_outputs(fields: Iterable[OutputField]) -> list[OutputField]:
     return list(unique.values())
 
 
-def _safe_record_path(url: str) -> str | None:
+def _safe_record(url: str) -> tuple[str, dict[str, set[str]]] | None:
     parsed = urlsplit(url)
     if parsed.scheme and parsed.scheme.casefold() not in {"http", "https"}:
         return None
     path = parsed.path or "/"
     if not path.startswith("/") or "%" in path or ".." in path.split("/"):
         return None
-    return path
+    try:
+        pairs = parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            encoding="utf-8",
+            errors="strict",
+            max_num_fields=100,
+        )
+    except (UnicodeError, ValueError):
+        pairs = []
+    observed_query: dict[str, set[str]] = {}
+    for name, value in pairs:
+        if not _SAFE_QUERY_NAME.fullmatch(name):
+            continue
+        observed_query.setdefault(name, set()).add(value)
+    return path, observed_query
+
+
+def _store_observed_query(
+    runtime: RuntimeContext,
+    operation_id: str,
+    observed_query: Mapping[str, set[str]],
+) -> None:
+    for name in sorted(observed_query):
+        key = (operation_id, "query", name)
+        union_values = runtime.parameter_examples.setdefault(key, set())
+        observed_values = runtime.observed_parameter_examples.setdefault(key, set())
+        for value in sorted(observed_query[name]):
+            secret = _RuntimeSecret(value)
+            union_values.add(secret)
+            observed_values.add(secret)
 
 
 def _template_matches(path_template: str, path: str) -> bool:

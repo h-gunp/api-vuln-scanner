@@ -94,10 +94,10 @@ class _RuntimeJsonBody:
 @dataclass(frozen=True)
 class ResponseSnapshot:
     status_code: int
-    headers: Mapping[str, str]
-    cookies: Mapping[str, str]
-    json_body: object | None
-    url: str
+    headers: Mapping[str, str] = field(repr=False)
+    cookies: Mapping[str, str] = field(repr=False)
+    json_body: object | None = field(repr=False)
+    url: str = field(repr=False)
     runtime_json_body: _RuntimeJsonBody | None = field(
         default=None,
         repr=False,
@@ -110,6 +110,8 @@ class ResponseSnapshot:
 
 
 class SafeHttpClient:
+    _MAX_REDIRECT_HOPS = 3
+
     def __init__(
         self,
         *,
@@ -146,6 +148,8 @@ class SafeHttpClient:
 
         current_url = url
         current_params = params
+        visited_urls: set[str] = set()
+        redirect_hops = 0
         values = sensitive_values if sensitive_values is not None else set()
         self._client.cookies.clear()
         try:
@@ -171,6 +175,7 @@ class SafeHttpClient:
                     self._emit("REQUEST_FAILED")
                     raise ScannerRequestError("scanner request failed") from None
 
+                visited_urls.add(str(response.request.url))
                 if response.is_redirect and response.headers.get("location"):
                     if not follow_redirects:
                         return self._snapshot(
@@ -178,7 +183,29 @@ class SafeHttpClient:
                             values,
                             hide_login_response=is_login,
                         )
-                    current_url = urljoin(str(response.url), response.headers["location"])
+                    next_url = urljoin(
+                        str(response.url),
+                        response.headers["location"],
+                    )
+                    canonical_next_url = _canonical_url(next_url)
+                    first_login_handshake_redirect = (
+                        is_login and redirect_hops == 0
+                    )
+                    if (
+                        canonical_next_url in visited_urls
+                        and not first_login_handshake_redirect
+                    ):
+                        self._emit("REDIRECT_LOOP")
+                        raise ScannerRequestError(
+                            "scanner redirect loop detected"
+                        ) from None
+                    if redirect_hops >= self._MAX_REDIRECT_HOPS:
+                        self._emit("REDIRECT_LIMIT")
+                        raise ScannerRequestError(
+                            "scanner redirect limit exceeded"
+                        ) from None
+                    redirect_hops += 1
+                    current_url = canonical_next_url
                     current_params = None
                     continue
 
@@ -297,6 +324,13 @@ def _redact_response_sensitive_fields(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_redact_response_sensitive_fields(item) for item in value]
     return value
+
+
+def _canonical_url(url: str) -> str:
+    try:
+        return str(httpx.URL(url))
+    except (httpx.InvalidURL, UnicodeError):
+        return url
 
 
 def _is_response_sensitive_key(key: str) -> bool:
