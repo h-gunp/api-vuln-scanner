@@ -125,6 +125,42 @@ def openapi_document() -> dict[str, object]:
     }
 
 
+def numeric_sensitive_openapi_document(
+    *,
+    declare_output: bool,
+) -> dict[str, object]:
+    response: dict[str, object] = {"description": "cards"}
+    if declare_output:
+        response["content"] = {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "card_number": {"type": "integer"}
+                                },
+                            },
+                        }
+                    },
+                }
+            }
+        }
+    return {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/cards": {
+                "get": {
+                    "responses": {"200": response},
+                }
+            }
+        },
+    }
+
+
 class RecordingBackend(FakeBackendClient):
     def __init__(self) -> None:
         super().__init__()
@@ -912,6 +948,108 @@ def test_collected_object_id_generalizes_matching_authoritative_path_segment() -
         + repr(scanner)
     )
     assert runtime_account_id not in rendered
+
+
+def test_numeric_sensitive_live_output_keeps_integer_type_without_raw_value() -> None:
+    backend = RecordingBackend()
+    card_number = 4111111111111111
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            username = json.loads(request.content)["username"]
+            return httpx.Response(
+                200,
+                json={"access_token": f"token-{username[-1]}"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(
+                200,
+                json=numeric_sensitive_openapi_document(declare_output=False),
+                request=request,
+            )
+        if request.url.path == "/api/cards":
+            return httpx.Response(
+                200,
+                json={"items": [{"card_number": card_number}]},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(records=()),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload(sources=["openapi"])))
+    )
+
+    operation = outcome.graph.operations[0]
+    assert [
+        (field.field_path, field.type)
+        for field in operation.outputs
+        if field.field_path == "items[].card_number"
+    ] == [("items[].card_number", "integer")]
+    rendered = (
+        outcome.graph.model_dump_json()
+        + backend.published[0].content.decode()
+        + repr(backend.__dict__)
+        + repr(scanner)
+    )
+    assert str(card_number) not in rendered
+
+
+def test_numeric_sensitive_live_output_does_not_add_string_to_openapi_integer() -> None:
+    backend = RecordingBackend()
+    card_number = 4111111111111111
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            username = json.loads(request.content)["username"]
+            return httpx.Response(
+                200,
+                json={"access_token": f"token-{username[-1]}"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(
+                200,
+                json=numeric_sensitive_openapi_document(declare_output=True),
+                request=request,
+            )
+        if request.url.path == "/api/cards":
+            return httpx.Response(
+                200,
+                json={"items": [{"card_number": card_number}]},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(records=()),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload(sources=["openapi"])))
+    )
+
+    operation = outcome.graph.operations[0]
+    assert [
+        (field.field_path, field.type)
+        for field in operation.outputs
+        if field.field_path == "items[].card_number"
+    ] == [("items[].card_number", "integer")]
+    rendered = (
+        outcome.graph.model_dump_json()
+        + backend.published[0].content.decode()
+        + repr(backend.__dict__)
+        + repr(scanner)
+    )
+    assert str(card_number) not in rendered
 
 
 def test_runtime_value_openapi_placeholder_is_renamed_with_matching_path_input() -> None:

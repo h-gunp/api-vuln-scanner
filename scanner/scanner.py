@@ -35,7 +35,7 @@ from scanner.crawler.normalizer import (
     merge_katana_records,
     normalize_openapi,
 )
-from scanner.http_client import SafeHttpClient, ScannerRequestError
+from scanner.http_client import ResponseSnapshot, SafeHttpClient, ScannerRequestError
 from scanner.integration.backend_client import (
     BackendClient,
     ScannerErrorReport,
@@ -580,7 +580,7 @@ class Scanner:
                     raise
                 except (BudgetExceeded, PolicyViolation, ScannerRequestError):
                     continue
-                if not snapshot.is_success or snapshot.json_body is None:
+                if not snapshot.is_success or snapshot.runtime_json_body is None:
                     continue
                 session_manager.collect_response(
                     runtime,
@@ -588,7 +588,7 @@ class Scanner:
                     operation_id=operation.operation_id,
                     body=snapshot.json_body,
                 )
-                inferred = infer_output_fields(snapshot.json_body)
+                inferred = self._infer_runtime_output_fields(snapshot)
                 observed_outputs.setdefault(operation.operation_id, {})[actor_id] = {
                     (field.field_path, field.type): field for field in inferred
                 }
@@ -625,6 +625,18 @@ class Scanner:
             scan_id=graph.scan_id,
             operations=operations,
         )
+
+    @staticmethod
+    def _infer_runtime_output_fields(
+        snapshot: ResponseSnapshot,
+    ) -> list[OutputField]:
+        runtime_body = snapshot.runtime_json_body
+        if runtime_body is None:
+            return []
+        try:
+            return infer_output_fields(runtime_body.reveal())
+        except Exception:
+            return []
 
     @classmethod
     def _normalize_operation_paths(
