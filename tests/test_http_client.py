@@ -313,10 +313,33 @@ def test_login_response_consumer_receives_raw_response_before_snapshot_redaction
     )
 
     assert received == [("token-a", {"sid-a": "cookie-a"})]
-    assert snapshot.json_body == {"access_token": "[REDACTED]"}
+    assert snapshot.json_body is None
     assert "token-a" not in repr(snapshot)
     assert "sid-a" not in repr(snapshot)
     assert "cookie-a" not in repr(snapshot)
+
+
+def test_login_snapshot_drops_custom_configured_token_field_after_consumer(
+    profile: TargetProfile,
+):
+    received: list[str] = []
+    client, _ = make_client(
+        profile,
+        lambda request: httpx.Response(200, json={"custom_session": "token-a"}),
+    )
+
+    snapshot = client.request(
+        "POST",
+        "http://vuln-bank.local/api/login",
+        is_login=True,
+        login_response_consumer=lambda response: received.append(
+            response.json()["custom_session"]
+        ),
+    )
+
+    assert received == ["token-a"]
+    assert snapshot.json_body is None
+    assert "token-a" not in repr(snapshot)
 
 
 def test_login_response_consumer_is_rejected_before_non_login_transport(profile: TargetProfile):
@@ -337,7 +360,7 @@ def test_login_response_consumer_is_rejected_before_non_login_transport(profile:
     assert budget.requests_used == 0
 
 
-def test_login_response_consumer_is_called_once_when_login_redirects(profile: TargetProfile):
+def test_login_response_consumer_is_called_once_on_final_login_response(profile: TargetProfile):
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -356,5 +379,28 @@ def test_login_response_consumer_is_called_once_when_login_redirects(profile: Ta
         login_response_consumer=lambda response: received_statuses.append(response.status_code),
     )
 
-    assert received_statuses == [302]
-    assert snapshot.json_body == {"access_token": "[REDACTED]"}
+    assert received_statuses == [200]
+    assert snapshot.json_body is None
+
+
+def test_automatic_cookie_state_does_not_cross_login_requests(profile: TargetProfile):
+    received_cookies: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received_cookies.append(request.headers.get("cookie"))
+        return httpx.Response(
+            200,
+            headers={"Set-Cookie": "sid=actor-a-cookie; HttpOnly"},
+            json={"access_token": "token-a"},
+        )
+
+    client, _ = make_client(profile, handler)
+    for _ in range(2):
+        client.request(
+            "POST",
+            "http://vuln-bank.local/api/login",
+            is_login=True,
+            login_response_consumer=lambda response: response.json(),
+        )
+
+    assert received_cookies == [None, None]

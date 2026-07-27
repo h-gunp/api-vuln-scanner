@@ -18,6 +18,34 @@ class AuthenticationError(Exception):
     """A fixed, secret-free runtime authentication failure."""
 
 
+class _RuntimeSecret:
+    """A runtime-only scalar that becomes redacted when copied for serialization."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __repr__(self) -> str:
+        return "[REDACTED]"
+
+    __str__ = __repr__
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _RuntimeSecret):
+            return self._value == other._value
+        return isinstance(other, str) and self._value == other
+
+    def __deepcopy__(self, memo: dict[int, object]) -> str:
+        return "[REDACTED]"
+
+
 class _RuntimeOnly:
     @classmethod
     def __get_pydantic_core_schema__(
@@ -39,17 +67,21 @@ class _RuntimeOnly:
 @dataclass
 class ActorSession(_RuntimeOnly):
     actor_id: Literal["user_a", "user_b"]
-    token: str | None = field(default=None, repr=False)
-    cookies: dict[str, str] = field(default_factory=dict, repr=False)
+    token: _RuntimeSecret | str | None = field(default=None, repr=False)
+    cookies: dict[str, _RuntimeSecret | str] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.token, str):
+            self.token = _RuntimeSecret(self.token)
+        self.cookies = {
+            name: value if isinstance(value, _RuntimeSecret) else _RuntimeSecret(value)
+            for name, value in self.cookies.items()
+        }
 
     def authorization_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
         if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if self.cookies:
-            headers["Cookie"] = "; ".join(
-                f"{name}={value}" for name, value in sorted(self.cookies.items())
-            )
+            headers["Authorization"] = f"Bearer {self.token.reveal()}"
         return headers
 
 
@@ -57,8 +89,8 @@ class ActorSession(_RuntimeOnly):
 class RuntimeDiscoveryMetadata(_RuntimeOnly):
     actor_id: Literal["user_a", "user_b"]
     operation_id: str
-    object_ids: dict[str, set[str]] = field(default_factory=dict, repr=False)
-    parameter_examples: dict[tuple[str, str, str], set[str]] = field(
+    object_ids: dict[str, set[_RuntimeSecret]] = field(default_factory=dict, repr=False)
+    parameter_examples: dict[tuple[str, str, str], set[_RuntimeSecret]] = field(
         default_factory=dict,
         repr=False,
     )
@@ -68,9 +100,9 @@ class RuntimeDiscoveryMetadata(_RuntimeOnly):
 class RuntimeContext(_RuntimeOnly):
     scan_id: str
     sessions: dict[str, ActorSession] = field(default_factory=dict, repr=False)
-    credentials: set[str] = field(default_factory=set, repr=False)
-    object_ids: dict[str, dict[str, set[str]]] = field(default_factory=dict, repr=False)
-    parameter_examples: dict[tuple[str, str, str], set[str]] = field(
+    credentials: set[_RuntimeSecret] = field(default_factory=set, repr=False)
+    object_ids: dict[str, dict[str, set[_RuntimeSecret]]] = field(default_factory=dict, repr=False)
+    parameter_examples: dict[tuple[str, str, str], set[_RuntimeSecret]] = field(
         default_factory=dict,
         repr=False,
     )
@@ -80,16 +112,16 @@ class RuntimeContext(_RuntimeOnly):
     )
 
     def sensitive_values(self) -> set[str]:
-        values = set(self.credentials)
+        values = {credential.reveal() for credential in self.credentials}
         for session in self.sessions.values():
             if session.token:
-                values.add(session.token)
-            values.update(value for value in session.cookies.values() if value)
+                values.add(session.token.reveal())
+            values.update(value.reveal() for value in session.cookies.values())
         for actor_objects in self.object_ids.values():
             for identifiers in actor_objects.values():
-                values.update(identifiers)
+                values.update(identifier.reveal() for identifier in identifiers)
         for examples in self.parameter_examples.values():
-            values.update(examples)
+            values.update(example.reveal() for example in examples)
         return values
 
 
@@ -106,16 +138,19 @@ class SessionManager:
 
     def authenticate(self, profile: TargetProfile) -> RuntimeContext:
         runtime = RuntimeContext(scan_id=profile.scan_id)
+        failed = False
         try:
             for actor in profile.authentication.actors:
                 username = self._environment_value(actor.username_env)
                 password = self._environment_value(actor.password_env)
-                runtime.credentials.update({username, password})
+                runtime.credentials.update({_RuntimeSecret(username), _RuntimeSecret(password)})
                 runtime.sessions[actor.actor_id] = self._authenticate_actor(
                     profile, actor.actor_id, username, password
                 )
         except Exception:
-            raise AuthenticationError("runtime authentication failed") from None
+            failed = True
+        if failed:
+            raise AuthenticationError("runtime authentication failed")
         return runtime
 
     def collect_response(
@@ -165,22 +200,27 @@ class SessionManager:
         if login.content_type.casefold() != "application/json":
             raise ValueError("unsupported login content type")
 
-        captured: dict[str, object] = {}
+        captured_token: _RuntimeSecret | None = None
+        login_failed = False
 
         def consume_login_response(response: httpx.Response) -> None:
+            nonlocal captured_token, login_failed
             if not 200 <= response.status_code < 300:
-                raise ValueError("login failed")
+                login_failed = True
+                return
             try:
                 payload = response.json()
             except ValueError:
-                raise ValueError("malformed login response") from None
+                login_failed = True
+                return
             if not isinstance(payload, Mapping):
-                raise ValueError("malformed login response")
+                login_failed = True
+                return
             token = payload.get(login.session.token_field)
             if not isinstance(token, str) or not token:
-                raise ValueError("missing login session")
-            captured["token"] = token
-            captured["cookies"] = dict(response.cookies)
+                login_failed = True
+                return
+            captured_token = _RuntimeSecret(token)
 
         self._http_client.request(
             login.method,
@@ -194,14 +234,11 @@ class SessionManager:
             sensitive_values={username, password},
             login_response_consumer=consume_login_response,
         )
-        token = captured.get("token")
-        if not isinstance(token, str):
+        if login_failed or captured_token is None:
             raise ValueError("missing login session")
-        cookies = captured.get("cookies")
         return ActorSession(
             actor_id=actor_id,
-            token=token,
-            cookies=dict(cookies) if isinstance(cookies, dict) else {},
+            token=captured_token,
         )
 
     @staticmethod
@@ -214,14 +251,14 @@ class SessionManager:
     def _collect_object_ids(
         self,
         value: object,
-        actor_objects: dict[str, set[str]],
-        metadata_objects: dict[str, set[str]],
+        actor_objects: dict[str, set[_RuntimeSecret]],
+        metadata_objects: dict[str, set[_RuntimeSecret]],
     ) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
                 object_type = self._OBJECT_KEYS.get(key) if isinstance(key, str) else None
                 if object_type is not None and self._is_scalar(item):
-                    identifier = str(item)
+                    identifier = _RuntimeSecret(str(item))
                     actor_objects.setdefault(object_type, set()).add(identifier)
                     metadata_objects.setdefault(object_type, set()).add(identifier)
                 self._collect_object_ids(item, actor_objects, metadata_objects)
@@ -231,8 +268,8 @@ class SessionManager:
 
     @staticmethod
     def _collect_examples(
-        runtime_examples: dict[tuple[str, str, str], set[str]],
-        metadata_examples: dict[tuple[str, str, str], set[str]],
+        runtime_examples: dict[tuple[str, str, str], set[_RuntimeSecret]],
+        metadata_examples: dict[tuple[str, str, str], set[_RuntimeSecret]],
         operation_id: str,
         location: str,
         observed: Mapping[str, object] | None,
@@ -242,7 +279,7 @@ class SessionManager:
         for field_name, value in observed.items():
             if SessionManager._is_scalar(value):
                 key = (operation_id, location, field_name)
-                example = str(value)
+                example = _RuntimeSecret(str(value))
                 runtime_examples.setdefault(key, set()).add(example)
                 metadata_examples.setdefault(key, set()).add(example)
 

@@ -90,7 +90,7 @@ class SafeHttpClient:
 
         current_url = url
         current_params = params
-        values = sensitive_values or set()
+        values = sensitive_values if sensitive_values is not None else set()
 
         while True:
             try:
@@ -106,6 +106,7 @@ class SafeHttpClient:
                 self._emit("POLICY_DENIED")
                 raise
             self._budget.reserve()
+            self._client.cookies.clear()
             try:
                 response = self._client.request(
                     method,
@@ -117,27 +118,39 @@ class SafeHttpClient:
             except httpx.HTTPError:
                 self._emit("REQUEST_FAILED")
                 raise ScannerRequestError("scanner request failed") from None
-
-            if login_response_consumer is not None:
-                login_response_consumer(response)
-                login_response_consumer = None
+            finally:
+                self._client.cookies.clear()
 
             if response.is_redirect and response.headers.get("location"):
                 current_url = urljoin(str(response.url), response.headers["location"])
                 current_params = None
                 continue
-            return self._snapshot(response, values)
 
-    def _snapshot(self, response: httpx.Response, sensitive_values: set[str]) -> ResponseSnapshot:
-        try:
-            body: object | None = response.json()
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            body = None
-        clean_headers = {
-            key.casefold(): self._redactor.redact(value, sensitive_values)
-            for key, value in response.headers.items()
-            if key.casefold() not in SENSITIVE_KEYS
-        }
+            if login_response_consumer is not None and not response.is_redirect:
+                login_response_consumer(response)
+                login_response_consumer = None
+            return self._snapshot(response, values, hide_login_response=is_login)
+
+    def _snapshot(
+        self,
+        response: httpx.Response,
+        sensitive_values: set[str],
+        *,
+        hide_login_response: bool = False,
+    ) -> ResponseSnapshot:
+        if hide_login_response:
+            body: object | None = None
+            clean_headers: Mapping[str, str] = {}
+        else:
+            try:
+                body = response.json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                body = None
+            clean_headers = {
+                key.casefold(): self._redactor.redact(value, sensitive_values)
+                for key, value in response.headers.items()
+                if key.casefold() not in SENSITIVE_KEYS
+            }
         return ResponseSnapshot(
             status_code=response.status_code,
             headers=clean_headers,

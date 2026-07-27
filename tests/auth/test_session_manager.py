@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import json
+import traceback
 
 import httpx
 import pytest
@@ -20,7 +22,7 @@ from scanner.integration.backend_client import FakeBackendClient
 from scanner.policy import CancellationGuard, PolicyEnforcer, RequestBudget
 
 
-def target_profile() -> TargetProfile:
+def target_profile(*, token_field: str = "access_token") -> TargetProfile:
     return TargetProfile.model_validate(
         {
             "schema_version": "1.1",
@@ -38,7 +40,7 @@ def target_profile() -> TargetProfile:
                     "content_type": "application/json",
                     "username_field": "username",
                     "password_field": "password",
-                    "session": {"type": "bearer", "token_field": "access_token"},
+                    "session": {"type": "bearer", "token_field": token_field},
                 },
                 "actors": [
                     {
@@ -177,6 +179,84 @@ def test_authenticate_redacts_transport_exception_details():
     assert str(error.value) == "runtime authentication failed"
 
 
+def test_authenticate_exception_has_no_raw_context_cause_or_traceback_values():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"user-a pw-a token-a not-json")
+
+    profile, manager, _ = make_manager(handler)
+
+    with pytest.raises(AuthenticationError) as error:
+        manager.authenticate(profile)
+
+    rendered = "".join(traceback.format_exception(error.value))
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+    assert "user-a" not in rendered
+    assert "pw-a" not in rendered
+    assert "token-a" not in rendered
+
+
+def test_authenticate_uses_final_redirect_login_response():
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            return httpx.Response(302, headers={"Location": "/api/login"}, request=request)
+        return httpx.Response(200, json={"access_token": "token-a"}, request=request)
+
+    profile, manager, _ = make_manager(handler)
+
+    runtime = manager.authenticate(profile)
+
+    assert requests == 3
+    assert runtime.sessions["user_a"].authorization_headers() == {
+        "Authorization": "Bearer token-a"
+    }
+
+
+def test_authenticate_drops_incidental_login_cookies_for_bearer_sessions():
+    observed_requests: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        username = json.loads(request.content)["username"]
+        observed_requests.append((username, request.headers.get("cookie")))
+        return httpx.Response(
+            200,
+            headers={"Set-Cookie": "sid=incidental-cookie; HttpOnly"},
+            json={"access_token": f"token-{username[-1]}"},
+        )
+
+    profile, manager, _ = make_manager(handler)
+
+    runtime = manager.authenticate(profile)
+
+    assert runtime.sessions["user_a"].cookies == {}
+    assert runtime.sessions["user_a"].authorization_headers() == {
+        "Authorization": "Bearer token-a"
+    }
+    assert "incidental-cookie" not in runtime.sensitive_values()
+    assert observed_requests == [("user-a", None), ("user-b", None)]
+
+
+def test_authenticate_supports_custom_token_field_without_snapshot_leakage():
+    profile = target_profile(token_field="custom_session")
+    client = SafeHttpClient(
+        policy=PolicyEnforcer(profile),
+        budget=RequestBudget(max_requests=10, requests_per_second=1000),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"custom_session": "token-a"})
+        ),
+    )
+
+    runtime = SessionManager(client).authenticate(profile)
+
+    assert runtime.sessions["user_a"].authorization_headers() == {
+        "Authorization": "Bearer token-a"
+    }
+
+
 def test_collect_response_keeps_object_ids_and_examples_private():
     profile, manager, _ = make_manager(lambda request: httpx.Response(200))
     runtime = RuntimeContext(scan_id=profile.scan_id)
@@ -218,3 +298,28 @@ def test_actor_session_hides_cookie_and_token_from_repr_and_serialization():
     assert "cookie-a" not in repr(session)
     with pytest.raises(PydanticSerializationError):
         TypeAdapter(ActorSession).dump_json(session)
+
+
+def test_asdict_and_json_redact_runtime_secret_values_while_runtime_access_works():
+    profile, manager, _ = make_manager(
+        lambda request: httpx.Response(200, json={"access_token": "token-a"})
+    )
+    runtime = manager.authenticate(profile)
+    manager.collect_response(
+        runtime,
+        actor_id="user_b",
+        operation_id="GET:/api/accounts",
+        body={"account_id": "acct-b-1"},
+        observed_query={"page": "1"},
+    )
+
+    as_dict = dataclasses.asdict(runtime)
+    serialized = json.dumps(as_dict, default=list, skipkeys=True)
+
+    for value in ("user-a", "pw-a", "token-a", "acct-b-1", '"1"'):
+        assert value not in repr(as_dict)
+        assert value not in serialized
+    assert runtime.sessions["user_a"].authorization_headers() == {
+        "Authorization": "Bearer token-a"
+    }
+    assert runtime.sensitive_values() >= {"user-a", "pw-a", "token-a", "acct-b-1", "1"}
