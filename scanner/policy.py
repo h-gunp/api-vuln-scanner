@@ -162,6 +162,18 @@ class RequestBudget:
         self._apply_rate_limit()
         self._requests_used += 1
 
+    def ensure_capacity(self, count: int) -> None:
+        """Check a fixed upcoming request allowance without consuming it."""
+
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("request capacity must be a positive integer")
+        self._raise_if_cancelled()
+        if (
+            self._active_lease is not None
+            or self._requests_used + count > self._max_requests
+        ):
+            raise BudgetExceeded("request budget exhausted")
+
     def lease(self, max_requests: int) -> "BudgetLease":
         if isinstance(max_requests, bool) or not isinstance(max_requests, int) or max_requests <= 0:
             raise ValueError("lease allowance must be a positive integer")

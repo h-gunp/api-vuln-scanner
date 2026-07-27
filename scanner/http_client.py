@@ -214,6 +214,11 @@ class SafeHttpClient:
             self._emit("POLICY_DENIED")
             raise
 
+    def ensure_capacity(self, count: int) -> None:
+        """Check shared request capacity without reserving a transport request."""
+
+        self._budget.ensure_capacity(count)
+
     def _snapshot(
         self,
         response: httpx.Response,

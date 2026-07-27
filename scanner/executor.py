@@ -2,26 +2,54 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
+from urllib.parse import urljoin
 
+from scanner.artifacts import ArtifactBuilder, Redactor
+from scanner.audit import AuditEvent, AuditSink, InMemoryAuditSink
+from scanner.auth.session_manager import RuntimeContext
 from scanner.contracts import (
+    AffectedField,
     ApprovalStatus,
     BindingHint,
+    Finding,
     InputBinding,
     NormalizedApiGraph,
     Operation,
     PlanApprovalDecision,
     RelationshipAnalysis,
     ScanPlan,
+    ScanResult,
     ScanStep,
     TestCandidate,
     TargetProfile,
+    Verification,
+    VulnerabilityType,
 )
-from scanner.integration.backend_client import BackendClient
+from scanner.http_client import SafeHttpClient, ScannerRequestError
+from scanner.integration.backend_client import (
+    BackendClient,
+    ScannerErrorReport,
+    ScannerStage,
+)
+from scanner.modules.base import (
+    BindingError,
+    ModuleExecutionContext,
+    ModuleOutcome,
+    ModuleVerdict,
+)
 from scanner.modules.bola import BolaModule
 from scanner.modules.data_exposure import DataExposureModule
 from scanner.modules.input_validation import InputValidationModule
-from scanner.policy import path_is_allowed
+from scanner.policy import (
+    BudgetExceeded,
+    CancellationGuard,
+    CancellationRequested,
+    PolicyViolation,
+    path_is_allowed,
+)
 
 
 _POLICY_MODULE_IDS = {
@@ -35,6 +63,47 @@ REQUEST_ESTIMATES = {
     "INPUT-001": 2,
     "DATA-001": 1,
 }
+_MODULE_RESULT_CONTRACTS = {
+    "BOLA-001": (
+        VulnerabilityType.BOLA,
+        "VERIFY-BOLA-001",
+        ("BOLA_FOREIGN_OBJECT_RETURNED",),
+    ),
+    "INPUT-001": (
+        VulnerabilityType.INPUT_VALIDATION,
+        "VERIFY-INPUT-001",
+        ("INPUT_INVALID_VALUE_EXPANDED_SCOPE",),
+    ),
+    "DATA-001": (
+        VulnerabilityType.DATA_EXPOSURE,
+        "VERIFY-DATA-001",
+        ("DATA_SENSITIVE_FIELD_UNMASKED",),
+    ),
+}
+_SAFE_INCONCLUSIVE_REASON_CODES = frozenset(
+    {
+        "BOLA_BASELINE_FAILED",
+        "BOLA_BINDING_UNAVAILABLE",
+        "BOLA_NON_GET_OPERATION",
+        "BOLA_PATH_UNSAFE",
+        "BOLA_POLICY_PREFLIGHT_FAILED",
+        "BOLA_RESPONSE_NOT_JSON",
+        "BOLA_SESSION_UNAVAILABLE",
+        "BOLA_VARIANT_FAILED",
+        "DATA_BINDING_UNAVAILABLE",
+        "DATA_NON_GET_OPERATION",
+        "DATA_POLICY_PREFLIGHT_FAILED",
+        "DATA_RESPONSE_UNAVAILABLE",
+        "DATA_SESSION_UNAVAILABLE",
+        "INPUT_BASELINE_UNAVAILABLE",
+        "INPUT_BINDING_UNAVAILABLE",
+        "INPUT_COMPARISON_UNAVAILABLE",
+        "INPUT_NON_GET_OPERATION",
+        "INPUT_POLICY_PREFLIGHT_FAILED",
+        "INPUT_SESSION_UNAVAILABLE",
+        "INPUT_UNSAFE_INPUT_LOCATION",
+    }
+)
 
 
 def module_for_policy(policy: str) -> str | None:
@@ -50,6 +119,10 @@ class Executor:
         self,
         backend: BackendClient,
         modules: Mapping[str, object] | None = None,
+        *,
+        client: SafeHttpClient | None = None,
+        artifact_builder: ArtifactBuilder | None = None,
+        audit_sink: AuditSink | None = None,
     ) -> None:
         self._backend = backend
         self._modules = dict(modules) if modules is not None else {
@@ -57,6 +130,9 @@ class Executor:
             "INPUT-001": InputValidationModule(),
             "DATA-001": DataExposureModule(),
         }
+        self._client = client
+        self._artifact_builder = artifact_builder or ArtifactBuilder(Redactor())
+        self._audit_sink = audit_sink or InMemoryAuditSink()
 
     def evaluate_plan(
         self,
@@ -153,6 +229,512 @@ class Executor:
         )
         self._backend.report_approval(job_id, decision)
         return decision
+
+    def execute(
+        self,
+        *,
+        job_id: str,
+        profile: TargetProfile,
+        graph: NormalizedApiGraph,
+        analysis: RelationshipAnalysis,
+        plan: ScanPlan,
+        runtime: RuntimeContext,
+        decision: PlanApprovalDecision,
+    ) -> ScanResult:
+        result = ScanResult(scan_id=profile.scan_id, findings=[])
+        if decision.status is not ApprovalStatus.APPROVED:
+            return result
+        if (
+            decision.scan_id != profile.scan_id
+            or decision.plan_id != plan.plan_id
+            or plan.scan_id != profile.scan_id
+            or graph.scan_id != profile.scan_id
+            or analysis.scan_id != profile.scan_id
+            or runtime.scan_id != profile.scan_id
+        ):
+            self._report_failure(
+                job_id,
+                profile.scan_id,
+                code="EXECUTION_DECISION_INVALID",
+                stage=ScannerStage.EXECUTING,
+                retryable=False,
+            )
+            return result
+        if not plan.steps:
+            return result
+        if self._client is None:
+            self._report_failure(
+                job_id,
+                profile.scan_id,
+                code="EXECUTION_CLIENT_UNAVAILABLE",
+                stage=ScannerStage.EXECUTING,
+                retryable=False,
+            )
+            return result
+
+        operations = {
+            operation.operation_id: operation for operation in graph.operations
+        }
+        candidates = {
+            candidate.candidate_id: candidate
+            for candidate in analysis.test_candidates
+        }
+        cancellation = CancellationGuard(self._backend)
+        findings: dict[str, Finding] = {}
+        for step in plan.steps:
+            try:
+                cancellation.raise_if_cancelled(job_id)
+            except CancellationRequested:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_CANCELLED",
+                    stage=ScannerStage.CANCELED,
+                    retryable=False,
+                    operation_id=None,
+                    module_id=(
+                        step.module_id
+                        if step.module_id in REQUEST_ESTIMATES
+                        else None
+                    ),
+                )
+                break
+
+            if step.module_id not in REQUEST_ESTIMATES:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_MODULE_NOT_APPROVED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=None,
+                    module_id=None,
+                )
+                break
+            operation = operations.get(step.target_operation_id)
+            candidate = candidates.get(step.candidate_id)
+            if not self._execution_step_is_valid(
+                profile=profile,
+                analysis=analysis,
+                step=step,
+                operation=operation,
+                candidate=candidate,
+            ):
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_STEP_INVALID",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=(
+                        operation.operation_id if operation is not None else None
+                    ),
+                    module_id=step.module_id,
+                )
+                break
+            module = self._modules.get(step.module_id)
+            run = getattr(module, "run", None)
+            if not callable(run):
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_MODULE_UNAVAILABLE",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=step.target_operation_id,
+                    module_id=step.module_id,
+                )
+                break
+
+            try:
+                self._client.preflight(
+                    operation.method,
+                    urljoin(
+                        f"{profile.target.base_url.rstrip('/')}/",
+                        operation.path_template.lstrip("/"),
+                    ),
+                    module_id=step.module_id,
+                )
+                self._client.ensure_capacity(REQUEST_ESTIMATES[step.module_id])
+            except CancellationRequested:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_CANCELLED",
+                    stage=ScannerStage.CANCELED,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                break
+            except BudgetExceeded:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_REQUEST_BUDGET_EXCEEDED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                break
+            except PolicyViolation:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_POLICY_DENIED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                break
+
+            context = ModuleExecutionContext(
+                scan_id=profile.scan_id,
+                base_url=profile.target.base_url,
+                operation=operation,
+                step=step,
+                runtime=runtime,
+                client=self._client,
+            )
+            try:
+                outcome = run(context)
+            except CancellationRequested:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_CANCELLED",
+                    stage=ScannerStage.CANCELED,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                break
+            except BudgetExceeded:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_REQUEST_BUDGET_EXCEEDED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                break
+            except PolicyViolation:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_POLICY_DENIED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+            except BindingError:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_BINDING_FAILED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+            except ScannerRequestError:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_REQUEST_FAILED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=True,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+            except Exception:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_MODULE_FAILED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+
+            if not isinstance(outcome, ModuleOutcome):
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_MODULE_FAILED",
+                    stage=ScannerStage.EXECUTING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+            if outcome.verdict is ModuleVerdict.NOT_FOUND:
+                self._emit(
+                    code="EXECUTION_MODULE_NOT_FOUND",
+                    level="INFO",
+                    job_id=job_id,
+                    scan_id=profile.scan_id,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+            if outcome.verdict is ModuleVerdict.INCONCLUSIVE:
+                self._emit(
+                    code=(
+                        outcome.reason_code
+                        if outcome.reason_code in _SAFE_INCONCLUSIVE_REASON_CODES
+                        else "EXECUTION_MODULE_INCONCLUSIVE"
+                    ),
+                    level="WARNING",
+                    job_id=job_id,
+                    scan_id=profile.scan_id,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+            try:
+                finding = self._verified_finding(
+                    job_id=job_id,
+                    scan_id=profile.scan_id,
+                    operation=operation,
+                    module_id=step.module_id,
+                    runtime=runtime,
+                    outcome=outcome,
+                )
+            except Exception:
+                self._report_failure(
+                    job_id,
+                    profile.scan_id,
+                    code="EXECUTION_MODULE_FAILED",
+                    stage=ScannerStage.VERIFYING,
+                    retryable=False,
+                    operation_id=operation.operation_id,
+                    module_id=step.module_id,
+                )
+                continue
+            if finding is not None:
+                findings.setdefault(finding.finding_id, finding)
+
+        return ScanResult(
+            scan_id=profile.scan_id,
+            findings=sorted(findings.values(), key=lambda finding: finding.finding_id),
+        )
+
+    @staticmethod
+    def _execution_step_is_valid(
+        *,
+        profile: TargetProfile,
+        analysis: RelationshipAnalysis,
+        step: ScanStep,
+        operation: Operation | None,
+        candidate: TestCandidate | None,
+    ) -> bool:
+        approved_module_ids = {
+            module_id
+            for policy in profile.safety_policy.approved_modules
+            if (module_id := module_for_policy(policy)) is not None
+        }
+        if (
+            step.module_id not in approved_module_ids
+            or set(analysis.approved_module_ids) != approved_module_ids
+            or operation is None
+            or candidate is None
+            or not candidate.executable
+        ):
+            return False
+        reasons: set[str] = set()
+        _check_operation(step, operation, profile, reasons)
+        return not reasons and _bindings_match(step, candidate, operation)
+
+    def _verified_finding(
+        self,
+        *,
+        job_id: str,
+        scan_id: str,
+        operation: Operation,
+        module_id: str,
+        runtime: RuntimeContext,
+        outcome: ModuleOutcome,
+    ) -> Finding | None:
+        contract = _MODULE_RESULT_CONTRACTS[module_id]
+        vulnerability_type, rule_id, expected_conditions = contract
+        conditions = tuple(sorted(set(outcome.conditions)))
+        if outcome.rule_id != rule_id or conditions != expected_conditions:
+            self._emit(
+                code="EXECUTION_MODULE_INCONCLUSIVE",
+                level="WARNING",
+                job_id=job_id,
+                scan_id=scan_id,
+                operation_id=operation.operation_id,
+                module_id=module_id,
+            )
+            return None
+
+        sensitive_values = runtime.sensitive_values()
+        redactor = Redactor()
+        affected: dict[tuple[str, str, str], AffectedField] = {}
+        for item in outcome.affected_fields:
+            field_path = redactor.redact(item.field_path, sensitive_values)
+            if not isinstance(field_path, str):
+                continue
+            cleaned = AffectedField(
+                location=item.location,
+                field_path=field_path,
+                data_class=item.data_class,
+            )
+            affected[
+                (cleaned.location, cleaned.field_path, cleaned.data_class)
+            ] = cleaned
+        affected_fields = tuple(affected[key] for key in sorted(affected))
+        if not affected_fields:
+            self._emit(
+                code="EXECUTION_MODULE_INCONCLUSIVE",
+                level="WARNING",
+                job_id=job_id,
+                scan_id=scan_id,
+                operation_id=operation.operation_id,
+                module_id=module_id,
+            )
+            return None
+
+        evidence_payload = {
+            "rule_id": rule_id,
+            "conditions": conditions,
+            "affected_fields": [
+                item.model_dump(mode="json") for item in affected_fields
+            ],
+            "evidence": outcome.evidence,
+        }
+        try:
+            envelope = self._artifact_builder.build(
+                scan_id=scan_id,
+                artifact_type="evidence",
+                schema_version=None,
+                payload=evidence_payload,
+                sensitive_values=sensitive_values,
+            )
+            evidence_ref = self._backend.publish_artifact(envelope)
+            if (
+                not isinstance(evidence_ref, str)
+                or not evidence_ref
+                or redactor.redact(evidence_ref, sensitive_values) != evidence_ref
+            ):
+                raise ValueError("evidence reference is invalid")
+        except Exception:
+            self._report_failure(
+                job_id,
+                scan_id,
+                code="EXECUTION_EVIDENCE_PUBLISH_FAILED",
+                stage=ScannerStage.VERIFYING,
+                retryable=True,
+                operation_id=operation.operation_id,
+                module_id=module_id,
+            )
+            return None
+
+        finding_id = _finding_id(
+            scan_id=scan_id,
+            operation_id=operation.operation_id,
+            rule_id=rule_id,
+            conditions=conditions,
+            affected_field_paths=tuple(
+                sorted(item.field_path for item in affected_fields)
+            ),
+        )
+        return Finding(
+            finding_id=finding_id,
+            operation_id=operation.operation_id,
+            vulnerability_type=vulnerability_type,
+            verification=Verification(
+                rule_id=rule_id,
+                verified_conditions=list(conditions),
+            ),
+            affected_fields=list(affected_fields),
+            evidence_refs=[evidence_ref],
+        )
+
+    def _report_failure(
+        self,
+        job_id: str,
+        scan_id: str,
+        *,
+        code: str,
+        stage: ScannerStage,
+        retryable: bool,
+        operation_id: str | None = None,
+        module_id: str | None = None,
+    ) -> None:
+        self._backend.report_error(
+            job_id,
+            ScannerErrorReport(
+                code=code,
+                stage=stage,
+                retryable=retryable,
+            ),
+        )
+        self._emit(
+            code=code,
+            level="WARNING",
+            job_id=job_id,
+            scan_id=scan_id,
+            operation_id=operation_id,
+            module_id=module_id,
+        )
+
+    def _emit(
+        self,
+        *,
+        code: str,
+        level: str,
+        job_id: str,
+        scan_id: str,
+        operation_id: str | None,
+        module_id: str | None,
+    ) -> None:
+        self._audit_sink.emit(
+            AuditEvent(
+                code=code,
+                level=level,
+                job_id=job_id,
+                scan_id=scan_id,
+                operation_id=operation_id,
+                module_id=module_id,
+                details={},
+            )
+        )
+
+
+def _finding_id(
+    *,
+    scan_id: str,
+    operation_id: str,
+    rule_id: str,
+    conditions: tuple[str, ...],
+    affected_field_paths: tuple[str, ...],
+) -> str:
+    material = json.dumps(
+        {
+            "affected_field_paths": list(affected_field_paths),
+            "conditions": list(conditions),
+            "operation_id": operation_id,
+            "rule_id": rule_id,
+            "scan_id": scan_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return f"finding-{hashlib.sha256(material).hexdigest()[:24]}"
 
 
 def _check_module(
