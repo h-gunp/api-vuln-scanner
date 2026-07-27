@@ -50,6 +50,17 @@ def test_redactor_removes_non_string_runtime_values_and_relative_query_secrets()
     assert cleaned["status"] == 200
 
 
+def test_redactor_removes_sensitive_numeric_and_string_mapping_keys():
+    cleaned = Redactor().redact(
+        {42: "safe-label", "token-a": "safe-label"},
+        sensitive_values={42, "token-a"},
+    )
+
+    rendered = json.dumps(cleaned)
+    assert "42" not in rendered
+    assert "token-a" not in rendered
+
+
 def test_artifact_builder_hashes_redacted_canonical_bytes():
     envelope = ArtifactBuilder(Redactor()).build(
         scan_id="scan-001",
@@ -86,6 +97,82 @@ def test_artifact_builder_never_serializes_raw_response_text_by_default():
 
     assert b"private-account-42" not in envelope.content
     assert envelope.content == b'{"response":"[REDACTED]","status":200}'
+
+
+def test_artifact_builder_never_serializes_arbitrary_evidence_text_by_default():
+    envelope = ArtifactBuilder(Redactor()).build(
+        scan_id="scan-001",
+        artifact_type="evidence",
+        schema_version=None,
+        payload={"note": "private-account-42", "status": 200},
+    )
+
+    assert b"private-account-42" not in envelope.content
+    assert envelope.content == b'{"note":"[REDACTED]","status":200}'
+
+
+def test_artifact_builder_preserves_normalized_graph_structural_text():
+    envelope = ArtifactBuilder(Redactor()).build(
+        scan_id="scan-001",
+        artifact_type="normalized_api_graph",
+        schema_version="1.1",
+        payload={
+            "schema_version": "1.1",
+            "scan_id": "scan-001",
+            "operations": [
+                {
+                    "operation_id": "get-account",
+                    "method": "GET",
+                    "path_template": "/api/accounts/{account_id}",
+                    "inputs": [
+                        {
+                            "location": "path",
+                            "field_path": "account_id",
+                            "type": "string",
+                        }
+                    ],
+                    "outputs": [{"field_path": "balance", "type": "number"}],
+                }
+            ],
+        },
+    )
+
+    assert b"get-account" in envelope.content
+    assert b"/api/accounts/{account_id}" in envelope.content
+
+
+def test_artifact_builder_preserves_scan_result_structural_text():
+    envelope = ArtifactBuilder(Redactor()).build(
+        scan_id="scan-001",
+        artifact_type="scan_result",
+        schema_version="1.2",
+        payload={
+            "schema_version": "1.2",
+            "scan_id": "scan-001",
+            "findings": [
+                {
+                    "finding_id": "finding-001",
+                    "operation_id": "get-account",
+                    "vulnerability_type": "BOLA",
+                    "verification": {
+                        "rule_id": "BOLA-001",
+                        "verified_conditions": ["ownership mismatch"],
+                    },
+                    "affected_fields": [
+                        {
+                            "location": "response",
+                            "field_path": "account_id",
+                            "data_class": "account",
+                        }
+                    ],
+                    "evidence_refs": ["artifact:1"],
+                }
+            ],
+        },
+    )
+
+    assert b"BOLA-001" in envelope.content
+    assert b"account_id" in envelope.content
 
 
 def test_in_memory_audit_sink_stores_redacted_event_details():
@@ -148,3 +235,21 @@ def test_in_memory_audit_sink_removes_numeric_runtime_values_but_keeps_counts():
     assert sink.events[-1].details["object_id"] == "[REDACTED]"
     assert sink.events[-1].details["operations"] == 3
     assert sink.events[-1].details["status"] == 200
+
+
+def test_in_memory_audit_sink_removes_non_string_runtime_mapping_keys():
+    sink = InMemoryAuditSink()
+
+    sink.emit(
+        AuditEvent(
+            code="DISCOVERY_PROGRESS",
+            level="INFO",
+            job_id="job-001",
+            scan_id="scan-001",
+            operation_id=None,
+            module_id=None,
+            details={42: "private-account-42", "status": 200},
+        )
+    )
+
+    assert "42" not in json.dumps(sink.events[-1].details)

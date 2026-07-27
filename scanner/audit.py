@@ -23,6 +23,15 @@ SAFE_NUMERIC_DETAIL_KEYS = frozenset(
         "status_code",
     }
 )
+SAFE_AUDIT_DETAIL_KEYS = SAFE_NUMERIC_DETAIL_KEYS | frozenset(
+    {
+        "authorization",
+        "cookie",
+        "error",
+        "object_id",
+        "response",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -54,7 +63,11 @@ class InMemoryAuditSink:
         redacted = self._redactor.redact(value)
         if isinstance(redacted, Mapping):
             return {
-                str(key): self._remove_runtime_details(
+                (
+                    str(key)
+                    if str(key).casefold() in SAFE_AUDIT_DETAIL_KEYS
+                    else "[REDACTED]"
+                ): self._remove_runtime_details(
                     item, str(key).casefold() in SAFE_NUMERIC_DETAIL_KEYS
                 )
                 for key, item in redacted.items()

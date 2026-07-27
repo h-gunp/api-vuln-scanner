@@ -25,13 +25,17 @@ SENSITIVE_KEYS = frozenset(
         "pin",
         "cvv",
         "session",
-        "response",
-        "response_body",
-        "body",
-        "object_id",
-        "account_id",
-        "parameter_value",
-        "observed_value",
+    }
+)
+STRUCTURAL_ARTIFACT_TYPES = frozenset({"normalized_api_graph", "scan_result"})
+SAFE_NUMERIC_ARTIFACT_KEYS = frozenset(
+    {
+        "count",
+        "counts",
+        "progress",
+        "requests_used",
+        "status",
+        "status_code",
     }
 )
 
@@ -60,6 +64,12 @@ class Redactor:
         )
         return self._redact_value(value, values, string_values)
 
+    @staticmethod
+    def _matches_sensitive(value: Any, sensitive_values: tuple[Any, ...]) -> bool:
+        return any(
+            type(value) is type(item) and value == item for item in sensitive_values
+        )
+
     def _redact_value(
         self,
         value: Any,
@@ -68,9 +78,15 @@ class Redactor:
     ) -> Any:
         if isinstance(value, Mapping):
             return {
-                str(key): (
+                (
+                    REDACTED
+                    if not isinstance(key, str)
+                    or self._matches_sensitive(key, sensitive_values)
+                    else key
+                ): (
                     REDACTED
                     if str(key).casefold() in SENSITIVE_KEYS
+                    or self._matches_sensitive(key, sensitive_values)
                     else self._redact_value(item, sensitive_values, string_values)
                 )
                 for key, item in value.items()
@@ -83,7 +99,7 @@ class Redactor:
             return REDACTED
         if isinstance(value, str):
             return self._redact_string(value, string_values)
-        if any(type(value) is type(item) and value == item for item in sensitive_values):
+        if self._matches_sensitive(value, sensitive_values):
             return REDACTED
         return value
 
@@ -117,9 +133,11 @@ class ArtifactBuilder:
         artifact_type: str,
         schema_version: str | None,
         payload: Mapping[str, Any],
-        sensitive_values: Iterable[str] = (),
+        sensitive_values: Iterable[Any] = (),
     ) -> ArtifactEnvelope:
         cleaned = self._redactor.redact(payload, sensitive_values)
+        if artifact_type not in STRUCTURAL_ARTIFACT_TYPES:
+            cleaned = self._remove_untyped_runtime_values(cleaned)
         content = json.dumps(
             cleaned,
             sort_keys=True,
@@ -134,3 +152,23 @@ class ArtifactBuilder:
             sha256=hashlib.sha256(content).hexdigest(),
             size=len(content),
         )
+
+    def _remove_untyped_runtime_values(
+        self, value: Any, allow_numeric: bool = False
+    ) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): self._remove_untyped_runtime_values(
+                    item, str(key).casefold() in SAFE_NUMERIC_ARTIFACT_KEYS
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return [
+                self._remove_untyped_runtime_values(item, allow_numeric) for item in value
+            ]
+        if isinstance(value, str):
+            return REDACTED
+        if isinstance(value, (int, float, bool)) and not allow_numeric:
+            return REDACTED
+        return value
