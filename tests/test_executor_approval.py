@@ -409,9 +409,31 @@ def test_rejects_endpoint_mismatch() -> None:
     )
 
 
+def test_rejects_matching_graph_and_step_endpoint_outside_profile_paths() -> None:
+    def mutate(documents: ApprovalDocuments) -> None:
+        documents.graph.operations[0].path_template = (
+            "/private/accounts/{account_id}"
+        )
+        documents.plan.steps[0].target_endpoint.path_template = (
+            "/private/accounts/{account_id}"
+        )
+
+    _assert_single_rejection(mutate, "PLAN_ENDPOINT_MISMATCH")
+
+
 def test_rejects_binding_mismatch() -> None:
     def mutate(documents: ApprovalDocuments) -> None:
         documents.plan.steps[0].input_bindings[0].parameter = "other_id"
+
+    _assert_single_rejection(mutate, "PLAN_BINDING_MISMATCH")
+
+
+@pytest.mark.parametrize("location", ["header", "body"])
+def test_rejects_input_module_header_or_body_binding(location: str) -> None:
+    def mutate(documents: ApprovalDocuments) -> None:
+        documents.graph.operations[1].inputs[0].location = location
+        documents.analysis.test_candidates[1].binding_hints[0].location = location
+        documents.plan.steps[1].input_bindings[0].location = location
 
     _assert_single_rejection(mutate, "PLAN_BINDING_MISMATCH")
 
@@ -512,6 +534,24 @@ def test_rejects_plan_that_correctly_reports_exceeded_budget() -> None:
         documents.plan.budget.within_budget = False
 
     _assert_single_rejection(mutate, "PLAN_REQUEST_BUDGET_EXCEEDED")
+
+
+def test_rejects_invalid_true_budget_flag_and_reports_exceeded_budget() -> None:
+    documents = _valid_documents()
+    documents.profile.safety_policy.max_requests = 7
+    documents.plan.budget.max_requests = 7
+    documents.plan.budget.within_budget = True
+
+    decision, backend, modules = _evaluate(documents)
+
+    assert decision.status == ApprovalStatus.REJECTED
+    assert decision.reason_codes == (
+        "PLAN_BUDGET_FLAG_INVALID",
+        "PLAN_REQUEST_BUDGET_EXCEEDED",
+    )
+    assert backend.approval_decisions[-1] is decision
+    assert all(module.calls == 0 for module in modules)
+    assert all(module.transport_calls == 0 for module in modules)
 
 
 def test_rejection_reasons_are_sorted_and_deduplicated() -> None:

@@ -21,6 +21,7 @@ from scanner.integration.backend_client import BackendClient
 from scanner.modules.bola import BolaModule
 from scanner.modules.data_exposure import DataExposureModule
 from scanner.modules.input_validation import InputValidationModule
+from scanner.policy import path_is_allowed
 
 
 _POLICY_MODULE_IDS = {
@@ -136,7 +137,7 @@ class Executor:
         )
         if budget.within_budget != calculated_within_budget:
             reasons.add("PLAN_BUDGET_FLAG_INVALID")
-        elif not calculated_within_budget:
+        if not calculated_within_budget:
             reasons.add("PLAN_REQUEST_BUDGET_EXCEEDED")
 
         reason_codes = tuple(sorted(reasons))
@@ -174,6 +175,10 @@ def _check_operation(
     if (
         step.target_endpoint.method != operation.method
         or step.target_endpoint.path_template != operation.path_template
+        or not path_is_allowed(
+            operation.path_template,
+            profile.target.allowed_paths,
+        )
     ):
         reasons.add("PLAN_ENDPOINT_MISMATCH")
     if (
@@ -204,6 +209,11 @@ def _bindings_match(
     if any(
         (binding.location, binding.parameter) not in operation_inputs
         or not _binding_shape_is_valid(binding)
+        for binding in step.input_bindings
+    ):
+        return False
+    if step.module_id == "INPUT-001" and any(
+        binding.location not in {"path", "query"}
         for binding in step.input_bindings
     ):
         return False

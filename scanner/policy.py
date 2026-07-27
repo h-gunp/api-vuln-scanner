@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import posixpath
 import time
+from collections.abc import Iterable
 from fnmatch import fnmatchcase
 from typing import Callable
 from urllib.parse import SplitResult, urlsplit
@@ -33,6 +34,18 @@ class CancellationGuard:
             raise CancellationRequested("scan cancelled")
 
 
+def path_is_allowed(path: str, allowed_paths: Iterable[str]) -> bool:
+    """Apply the request policy's path normalization and glob matching."""
+
+    try:
+        normalized_path = _normalize_policy_path(path)
+    except PolicyViolation:
+        return False
+    return any(
+        fnmatchcase(normalized_path, pattern) for pattern in allowed_paths
+    )
+
+
 class PolicyEnforcer:
     """Validates origin, path, method, module, and state-change policy."""
 
@@ -57,11 +70,11 @@ class PolicyEnforcer:
     ) -> None:
         request_method = method.upper()
         parsed = self._parse_in_scope_url(url)
-        normalized_path = self._normalized_path(parsed)
+        normalized_path = _normalize_policy_path(parsed.path or "/")
 
-        if not any(
-            fnmatchcase(normalized_path, pattern)
-            for pattern in self._profile.target.allowed_paths
+        if not path_is_allowed(
+            normalized_path,
+            self._profile.target.allowed_paths,
         ):
             raise PolicyViolation("request violates scanner safety policy")
 
@@ -105,22 +118,6 @@ class PolicyEnforcer:
     @staticmethod
     def _normalize_config_path(path: str) -> str:
         return posixpath.normpath(path if path.startswith("/") else f"/{path}")
-
-    def _normalized_path(self, parsed: SplitResult) -> str:
-        path = parsed.path or "/"
-        if "%" in path:
-            # Percent-encoded separators and dot segments can be decoded by a
-            # downstream server differently from urllib's parsed path. Refuse
-            # this ambiguous form instead of matching it against a wildcard.
-            raise PolicyViolation("request violates scanner safety policy")
-        parts = path.split("/")
-        if ".." in parts:
-            raise PolicyViolation("request violates scanner safety policy")
-        normalized = posixpath.normpath(path)
-        if not normalized.startswith("/"):
-            normalized = f"/{normalized}"
-        return normalized
-
 
 class RequestBudget:
     """Counts direct requests and conservatively reserves external crawler capacity."""
@@ -216,3 +213,16 @@ class BudgetLease:
         if not self._closed:
             self._budget._close_lease(self)
             object.__setattr__(self, "_closed", True)
+
+
+def _normalize_policy_path(path: str) -> str:
+    if "%" in path:
+        # Percent-encoded separators and dot segments can be decoded by a
+        # downstream server differently from this process.
+        raise PolicyViolation("request violates scanner safety policy")
+    if ".." in path.split("/"):
+        raise PolicyViolation("request violates scanner safety policy")
+    normalized = posixpath.normpath(path)
+    if not normalized.startswith("/"):
+        normalized = f"/{normalized}"
+    return normalized
