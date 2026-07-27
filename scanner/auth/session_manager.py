@@ -106,6 +106,12 @@ class RuntimeContext(_RuntimeOnly):
         default_factory=dict,
         repr=False,
     )
+    openapi_parameter_examples: dict[
+        tuple[str, str, str], set[_RuntimeSecret]
+    ] = field(default_factory=dict, repr=False)
+    observed_parameter_examples: dict[
+        tuple[str, str, str], set[_RuntimeSecret]
+    ] = field(default_factory=dict, repr=False)
     required_inputs: dict[str, set[tuple[str, str]]] = field(
         default_factory=dict,
         repr=False,
@@ -178,6 +184,7 @@ class SessionManager:
         ):
             self._collect_examples(
                 runtime.parameter_examples,
+                runtime.observed_parameter_examples,
                 metadata.parameter_examples,
                 operation_id,
                 location,
@@ -272,6 +279,7 @@ class SessionManager:
     @staticmethod
     def _collect_examples(
         runtime_examples: dict[tuple[str, str, str], set[_RuntimeSecret]],
+        observed_examples: dict[tuple[str, str, str], set[_RuntimeSecret]],
         metadata_examples: dict[tuple[str, str, str], set[_RuntimeSecret]],
         operation_id: str,
         location: str,
@@ -284,6 +292,7 @@ class SessionManager:
                 key = (operation_id, location, field_name)
                 example = _RuntimeSecret(str(value))
                 runtime_examples.setdefault(key, set()).add(example)
+                observed_examples.setdefault(key, set()).add(example)
                 metadata_examples.setdefault(key, set()).add(example)
 
     @staticmethod

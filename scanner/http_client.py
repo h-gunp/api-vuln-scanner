@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Mapping
 from urllib.parse import urljoin
 
@@ -41,6 +41,26 @@ class ScannerRequestError(Exception):
     """A sanitized transport failure that contains no target runtime values."""
 
 
+class _RuntimeJsonBody:
+    """Raw response JSON that requires deliberate in-memory access."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    def reveal(self) -> object:
+        return self._value
+
+    def __repr__(self) -> str:
+        return "[REDACTED]"
+
+    __str__ = __repr__
+
+    def __deepcopy__(self, memo: dict[int, object]) -> str:
+        return "[REDACTED]"
+
+
 @dataclass(frozen=True)
 class ResponseSnapshot:
     status_code: int
@@ -48,6 +68,11 @@ class ResponseSnapshot:
     cookies: Mapping[str, str]
     json_body: object | None
     url: str
+    runtime_json_body: _RuntimeJsonBody | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def is_success(self) -> bool:
@@ -168,12 +193,17 @@ class SafeHttpClient:
     ) -> ResponseSnapshot:
         if hide_login_response:
             body: object | None = None
+            runtime_body: _RuntimeJsonBody | None = None
             clean_headers: Mapping[str, str] = {}
         else:
             try:
-                body = response.json()
+                raw_body = response.json()
             except (json.JSONDecodeError, UnicodeDecodeError):
                 body = None
+                runtime_body = None
+            else:
+                body = self._redactor.redact(raw_body, sensitive_values)
+                runtime_body = _RuntimeJsonBody(raw_body)
             clean_headers = {
                 key.casefold(): self._redactor.redact(value, sensitive_values)
                 for key, value in response.headers.items()
@@ -183,10 +213,11 @@ class SafeHttpClient:
             status_code=response.status_code,
             headers=clean_headers,
             cookies={},
-            json_body=self._redactor.redact(body, sensitive_values),
+            json_body=body,
             url="[REDACTED]"
             if hide_login_response
             else self._redactor.redact(str(response.url), sensitive_values),
+            runtime_json_body=runtime_body,
         )
 
     @staticmethod

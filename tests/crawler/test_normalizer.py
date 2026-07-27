@@ -185,6 +185,13 @@ def test_normalize_openapi_keeps_only_sorted_get_structure_and_runtime_metadata(
         "GET:/api/accounts": {("body", "owner_id"), ("query", "page")},
         "GET:/api/accounts/{account_id}": {("path", "account_id")},
     }
+    assert runtime.openapi_parameter_examples[
+        ("GET:/api/accounts", "query", "page")
+    ] == {"3", "1"}
+    assert runtime.openapi_parameter_examples[
+        ("GET:/api/accounts", "body", "owner_id")
+    ] == {"owner-example"}
+    assert runtime.observed_parameter_examples == {}
     assert runtime.sensitive_values() >= {
         "owner-example",
         "3",

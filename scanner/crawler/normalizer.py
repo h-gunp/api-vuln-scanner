@@ -164,10 +164,13 @@ def _merge_parameters(
 
 def _clear_operation_metadata(runtime: RuntimeContext, operation_id: str) -> None:
     runtime.required_inputs.pop(operation_id, None)
-    for key in [
-        key for key in runtime.parameter_examples if key[0] == operation_id
-    ]:
-        del runtime.parameter_examples[key]
+    for examples in (
+        runtime.parameter_examples,
+        runtime.openapi_parameter_examples,
+        runtime.observed_parameter_examples,
+    ):
+        for key in [key for key in examples if key[0] == operation_id]:
+            del examples[key]
 
 
 def _normalize_parameters(
@@ -368,12 +371,14 @@ def _store_examples(
             values.append(source[key])
     if not values:
         return
-    stored = runtime.parameter_examples.setdefault(
-        (operation_id, location, field_path), set()
-    )
+    key = (operation_id, location, field_path)
+    stored = runtime.parameter_examples.setdefault(key, set())
+    openapi_stored = runtime.openapi_parameter_examples.setdefault(key, set())
     for value in values:
         if value is not None:
-            stored.add(_RuntimeSecret(str(value)))
+            example = _RuntimeSecret(str(value))
+            stored.add(example)
+            openapi_stored.add(example)
 
 
 def _required_names(schema: Mapping[str, object]) -> set[str]:

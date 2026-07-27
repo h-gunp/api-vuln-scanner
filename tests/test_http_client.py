@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import httpx
@@ -367,6 +368,42 @@ def test_snapshot_never_exposes_authorization_or_cookie_headers(profile: TargetP
     assert snapshot.headers["x-trace"] == "safe"
 
 
+def test_snapshot_keeps_raw_json_only_in_explicit_runtime_wrapper(
+    profile: TargetProfile,
+):
+    raw_body = {
+        "password": "custom-password-value",
+        "token": "custom-token-value",
+        "secret": "custom-secret-value",
+    }
+    client, _ = make_client(
+        profile,
+        lambda request: httpx.Response(200, json=raw_body),
+    )
+
+    snapshot = client.request(
+        "GET",
+        "http://vuln-bank.local/api/accounts",
+        module_id="DATA-001",
+    )
+
+    assert snapshot.json_body == {
+        "password": "[REDACTED]",
+        "token": "[REDACTED]",
+        "secret": "[REDACTED]",
+    }
+    assert snapshot.runtime_json_body is not None
+    assert snapshot.runtime_json_body.reveal() == raw_body
+    rendered = (
+        repr(snapshot)
+        + str(snapshot.runtime_json_body)
+        + repr(dataclasses.asdict(snapshot))
+        + json.dumps(dataclasses.asdict(snapshot))
+    )
+    for value in raw_body.values():
+        assert value not in rendered
+
+
 def test_login_response_consumer_receives_raw_response_before_snapshot_redaction(
     profile: TargetProfile,
 ):
@@ -392,6 +429,7 @@ def test_login_response_consumer_receives_raw_response_before_snapshot_redaction
 
     assert received == [("token-a", {"sid-a": "cookie-a"})]
     assert snapshot.json_body is None
+    assert snapshot.runtime_json_body is None
     assert "token-a" not in repr(snapshot)
     assert "sid-a" not in repr(snapshot)
     assert "cookie-a" not in repr(snapshot)
@@ -417,6 +455,7 @@ def test_login_snapshot_drops_custom_configured_token_field_after_consumer(
 
     assert received == ["token-a"]
     assert snapshot.json_body is None
+    assert snapshot.runtime_json_body is None
     assert "token-a" not in repr(snapshot)
 
 

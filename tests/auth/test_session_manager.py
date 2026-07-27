@@ -294,6 +294,10 @@ def test_collect_response_keeps_object_ids_and_examples_private():
     assert runtime.object_ids["user_b"]["transaction"] == {"41"}
     assert runtime.object_ids["user_b"]["card"] == {"card-b-1"}
     assert runtime.parameter_examples[("GET:/api/accounts", "query", "page")] == {"1"}
+    assert runtime.observed_parameter_examples[
+        ("GET:/api/accounts", "query", "page")
+    ] == {"1"}
+    assert runtime.openapi_parameter_examples == {}
     assert runtime.sensitive_values() >= {"acct-b-1", "41", "card-b-1", "1"}
 
     assert "acct-b-1" not in repr(runtime)
@@ -336,6 +340,7 @@ def test_asdict_and_json_redact_runtime_secret_values_while_runtime_access_works
     for value in ("user-a", "pw-a", "token-a", "acct-b-1", '"1"'):
         assert value not in repr(as_dict)
         assert value not in serialized
+    assert "1" not in repr(runtime.observed_parameter_examples)
     assert runtime.sessions["user_a"].authorization_headers() == {
         "Authorization": "Bearer token-a"
     }
