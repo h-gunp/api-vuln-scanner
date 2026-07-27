@@ -83,6 +83,7 @@ class SafeHttpClient:
         json_body: object | None = None,
         sensitive_values: set[str] | None = None,
         login_response_consumer: Callable[[httpx.Response], None] | None = None,
+        follow_redirects: bool = True,
     ) -> ResponseSnapshot:
         if login_response_consumer is not None and not is_login:
             self._emit("POLICY_DENIED")
@@ -94,18 +95,14 @@ class SafeHttpClient:
         self._client.cookies.clear()
         try:
             while True:
-                try:
-                    self._validate_headers(headers)
-                    self._policy.authorize(
-                        method,
-                        current_url,
-                        module_id=module_id,
-                        is_login=is_login,
-                        is_state_change=is_state_change,
-                    )
-                except PolicyViolation:
-                    self._emit("POLICY_DENIED")
-                    raise
+                self.preflight(
+                    method,
+                    current_url,
+                    module_id=module_id,
+                    is_login=is_login,
+                    is_state_change=is_state_change,
+                    headers=headers,
+                )
                 self._budget.reserve()
                 try:
                     response = self._client.request(
@@ -120,6 +117,12 @@ class SafeHttpClient:
                     raise ScannerRequestError("scanner request failed") from None
 
                 if response.is_redirect and response.headers.get("location"):
+                    if not follow_redirects:
+                        return self._snapshot(
+                            response,
+                            values,
+                            hide_login_response=is_login,
+                        )
                     current_url = urljoin(str(response.url), response.headers["location"])
                     current_params = None
                     continue
@@ -130,6 +133,31 @@ class SafeHttpClient:
                 return self._snapshot(response, values, hide_login_response=is_login)
         finally:
             self._client.cookies.clear()
+
+    def preflight(
+        self,
+        method: str,
+        url: str,
+        *,
+        module_id: str | None = None,
+        is_login: bool = False,
+        is_state_change: bool = False,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        """Authorize a request without cancellation, rate, budget, or transport work."""
+
+        try:
+            self._validate_headers(headers)
+            self._policy.authorize(
+                method,
+                url,
+                module_id=module_id,
+                is_login=is_login,
+                is_state_change=is_state_change,
+            )
+        except PolicyViolation:
+            self._emit("POLICY_DENIED")
+            raise
 
     def _snapshot(
         self,

@@ -147,6 +147,8 @@ def _path_parameters(path_template: str) -> tuple[str, ...]:
 
 
 def _assign_body_value(body: dict[str, object], field_path: str, value: str) -> None:
+    if "[" in field_path or "]" in field_path:
+        raise BindingError("operation binding failed")
     parts = field_path.split(".")
     if not parts or any(not part for part in parts):
         raise BindingError("operation binding failed")

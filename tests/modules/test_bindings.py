@@ -204,6 +204,32 @@ def test_unbound_body_input_fails_even_when_not_marked_required():
         bind_operation(operation=operation, bindings=[], runtime=runtime_context())
 
 
+@pytest.mark.parametrize(
+    "field_path",
+    ["items[].account_id", "items[0].account_id"],
+)
+def test_array_body_path_fails_instead_of_inventing_cardinality(field_path: str):
+    operation = account_detail_operation(
+        path_template="/api/accounts",
+        inputs=[InputField(location="body", field_path=field_path, type="string")],
+    )
+
+    with pytest.raises(BindingError, match="^operation binding failed$"):
+        bind_operation(
+            operation=operation,
+            bindings=[
+                InputBinding(
+                    parameter=field_path,
+                    location="body",
+                    binding_type="object_binding",
+                    object_type="account",
+                    owner="user_b",
+                )
+            ],
+            runtime=runtime_context(),
+        )
+
+
 def test_binding_error_and_bound_request_repr_do_not_expose_runtime_values():
     runtime = runtime_context()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Iterable
 from urllib.parse import urljoin
 
@@ -17,6 +18,7 @@ from scanner.modules.base import (
     ModuleVerdict,
     bind_operation,
 )
+from scanner.policy import PolicyViolation
 
 
 RULE_ID = "VERIFY-BOLA-001"
@@ -91,17 +93,44 @@ class BolaModule:
             return _inconclusive("BOLA_PATH_UNSAFE")
 
         sensitive_values = _session_sensitive_values(session)
+        baseline_url, baseline_headers = _prepare_request(
+            context,
+            baseline_request,
+            authorization=authorization,
+        )
+        variant_url, variant_headers = _prepare_request(
+            context,
+            variant_request,
+            authorization=authorization,
+        )
+        try:
+            context.client.preflight(
+                "GET",
+                baseline_url,
+                module_id=MODULE_ID,
+                headers=baseline_headers,
+            )
+            context.client.preflight(
+                "GET",
+                variant_url,
+                module_id=MODULE_ID,
+                headers=variant_headers,
+            )
+        except PolicyViolation:
+            return _inconclusive("BOLA_POLICY_PREFLIGHT_FAILED")
 
         baseline = _send(
             context,
             baseline_request,
-            authorization=authorization,
+            url=baseline_url,
+            headers=baseline_headers,
             sensitive_values=sensitive_values,
         )
         variant = _send(
             context,
             variant_request,
-            authorization=authorization,
+            url=variant_url,
+            headers=variant_headers,
             sensitive_values=sensitive_values,
         )
         evidence = _evidence(
@@ -131,6 +160,7 @@ class BolaModule:
         matches = _foreign_object_matches(
             selected_foreign_values,
             variant.json_body,
+            sensitive_values=context.runtime.sensitive_values(),
         )
         if not matches:
             return ModuleOutcome(
@@ -162,36 +192,60 @@ def _send(
     context: ModuleExecutionContext,
     request: BoundRequest,
     *,
-    authorization: str,
+    url: str,
+    headers: dict[str, str],
     sensitive_values: set[str],
 ) -> ResponseSnapshot:
+    return context.client.request(
+        "GET",
+        url,
+        module_id=MODULE_ID,
+        headers=headers,
+        params=request.query,
+        json_body=request.json_body,
+        sensitive_values=sensitive_values,
+        follow_redirects=False,
+    )
+
+
+def _prepare_request(
+    context: ModuleExecutionContext,
+    request: BoundRequest,
+    *,
+    authorization: str,
+) -> tuple[str, dict[str, str]]:
     headers = {
         name: value
         for name, value in request.headers.items()
         if name.casefold() != "authorization"
     }
     headers["Authorization"] = authorization
-    return context.client.request(
-        "GET",
+    return (
         urljoin(f"{context.base_url.rstrip('/')}/", request.path.lstrip("/")),
-        module_id=MODULE_ID,
-        headers=headers,
-        params=request.query,
-        json_body=request.json_body,
-        sensitive_values=sensitive_values,
+        headers,
     )
 
 
 def _foreign_object_matches(
     selected_values: dict[str, str],
     body: object,
+    *,
+    sensitive_values: set[str],
 ) -> tuple[tuple[str, str], ...]:
     matches: dict[str, str] = {}
-    for path, value in _scalar_fields(body):
+    for path_components, value in _scalar_fields(body):
         rendered = str(value)
         for object_type in sorted(selected_values):
-            if rendered == selected_values[object_type]:
-                matches.setdefault(path, object_type)
+            if (
+                rendered == selected_values[object_type]
+                and _is_identifying_path(path_components, object_type)
+            ):
+                safe_path = _sanitize_path(
+                    path_components,
+                    selected_values,
+                    sensitive_values,
+                )
+                matches.setdefault(_render_path(safe_path), object_type)
     return tuple(sorted(matches.items()))
 
 
@@ -226,17 +280,66 @@ def _foreign_runtime(
     return runtime, selected_values
 
 
-def _scalar_fields(value: object, path: str = "") -> Iterable[tuple[str, object]]:
+def _scalar_fields(
+    value: object,
+    path: tuple[str, ...] = (),
+) -> Iterable[tuple[tuple[str, ...], object]]:
     if isinstance(value, dict):
         for key in sorted(value, key=str):
-            field_path = f"{path}.{key}" if path else str(key)
-            yield from _scalar_fields(value[key], field_path)
+            yield from _scalar_fields(value[key], (*path, str(key)))
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
-            field_path = f"{path}[{index}]" if path else f"[{index}]"
-            yield from _scalar_fields(item, field_path)
+            yield from _scalar_fields(item, (*path, f"[{index}]"))
     elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
-        yield path or "$", value
+        yield path or ("$",), value
+
+
+def _is_identifying_path(path: tuple[str, ...], object_type: str) -> bool:
+    terminal = path[-1].casefold()
+    expected = f"{object_type}_id".casefold()
+    if terminal == expected:
+        return True
+    if terminal != "id":
+        return False
+    parents = [part.casefold() for part in path[:-1] if not part.startswith("[")]
+    return bool(parents) and parents[-1] == object_type.casefold()
+
+
+def _sanitize_path(
+    path: tuple[str, ...],
+    selected_values: dict[str, str],
+    sensitive_values: set[str],
+) -> tuple[str, ...]:
+    markers = {
+        value: "{runtime_value}"
+        for value in sensitive_values
+        if value
+    }
+    markers.update({
+        value: f"{{{object_type}_id}}"
+        for object_type, value in selected_values.items()
+    })
+    if not markers:
+        return path
+    pattern = re.compile(
+        "|".join(re.escape(value) for value in sorted(markers, key=len, reverse=True))
+    )
+    return tuple(
+        pattern.sub(lambda match: markers[match.group(0)], part)
+        for part in path
+    )
+
+
+def _render_path(path: tuple[str, ...]) -> str:
+    rendered = ""
+    for part in path:
+        if part.startswith("["):
+            rendered += part
+        elif rendered:
+            rendered += f".{part}"
+        else:
+            rendered = part
+    return rendered
 
 
 def _reveal_values(values: Iterable[object]) -> set[str]:

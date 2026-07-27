@@ -175,6 +175,57 @@ def test_allowed_get_reaches_transport_once_and_consumes_budget(profile: TargetP
     assert snapshot.json_body == {"balance": 10}
 
 
+def test_preflight_authorizes_without_budget_or_transport(profile: TargetProfile):
+    calls = []
+    client, budget = make_client(
+        profile,
+        lambda request: calls.append(request) or httpx.Response(200),
+    )
+
+    client.preflight(
+        "GET",
+        "http://vuln-bank.local/api/accounts/acct-a-1",
+        module_id="BOLA-001",
+        headers={"Authorization": "Bearer token-a"},
+    )
+
+    assert calls == []
+    assert budget.requests_used == 0
+
+
+@pytest.mark.parametrize(
+    ("url", "headers"),
+    [
+        ("http://vuln-bank.local/private/account", None),
+        (
+            "http://vuln-bank.local/api/accounts/acct-a-1",
+            {"X-Original-URL": "/private/account"},
+        ),
+    ],
+)
+def test_preflight_rejects_policy_or_headers_without_budget_or_transport(
+    profile: TargetProfile,
+    url: str,
+    headers: dict[str, str] | None,
+):
+    calls = []
+    client, budget = make_client(
+        profile,
+        lambda request: calls.append(request) or httpx.Response(200),
+    )
+
+    with pytest.raises(PolicyViolation):
+        client.preflight(
+            "GET",
+            url,
+            module_id="BOLA-001",
+            headers=headers,
+        )
+
+    assert calls == []
+    assert budget.requests_used == 0
+
+
 def test_allowed_same_origin_redirect_is_reauthorized_and_consumes_second_request(
     profile: TargetProfile,
 ):
@@ -192,6 +243,33 @@ def test_allowed_same_origin_redirect_is_reauthorized_and_consumes_second_reques
     assert calls == ["http://vuln-bank.local/api/start", "http://vuln-bank.local/api/final"]
     assert budget.requests_used == 2
     assert snapshot.url == "http://vuln-bank.local/api/final"
+
+
+def test_redirect_following_can_be_disabled_for_exactly_one_transport(
+    profile: TargetProfile,
+):
+    calls = []
+    client, budget = make_client(
+        profile,
+        lambda request: calls.append(str(request.url))
+        or httpx.Response(
+            302,
+            headers={"Location": "/api/final"},
+            request=request,
+        ),
+    )
+
+    snapshot = client.request(
+        "GET",
+        "http://vuln-bank.local/api/start",
+        module_id="BOLA-001",
+        follow_redirects=False,
+    )
+
+    assert calls == ["http://vuln-bank.local/api/start"]
+    assert budget.requests_used == 1
+    assert snapshot.status_code == 302
+    assert snapshot.url == "http://vuln-bank.local/api/start"
 
 
 @pytest.mark.parametrize("location", ["http://attacker.local/api/final", "/private/final"])

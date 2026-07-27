@@ -117,8 +117,9 @@ def execution_context(
     runtime: RuntimeContext | None = None,
     operation: Operation | None = None,
     step: ScanStep | None = None,
+    profile: TargetProfile | None = None,
 ) -> ModuleExecutionContext:
-    profile = target_profile()
+    profile = profile or target_profile()
     return ModuleExecutionContext(
         scan_id=profile.scan_id,
         base_url=profile.target.base_url,
@@ -212,6 +213,167 @@ def test_bola_success_without_identifiable_user_b_data_is_not_found():
     assert outcome.verdict is ModuleVerdict.NOT_FOUND
     assert outcome.conditions == ()
     assert len(requests) == 2
+
+
+def test_bola_echoed_identifier_in_nonsemantic_field_does_not_verify():
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if len(requests) == 1:
+            return httpx.Response(200, json={"account_id": "acct-a-1"})
+        return httpx.Response(
+            200,
+            json={"message": "access denied", "requested_id": "acct-b-1"},
+        )
+
+    outcome = BolaModule().run(execution_context(handler))
+
+    assert outcome.verdict is ModuleVerdict.NOT_FOUND
+    assert outcome.affected_fields == ()
+    assert len(requests) == 2
+
+
+def test_bola_preflights_both_request_specs_before_any_transport():
+    requests: list[httpx.Request] = []
+    profile = target_profile()
+    profile.target.allowed_paths = ["/api/accounts/acct-a-1"]
+
+    outcome = BolaModule().run(
+        execution_context(
+            lambda request: requests.append(request) or httpx.Response(200),
+            profile=profile,
+        )
+    )
+
+    assert outcome.verdict is ModuleVerdict.INCONCLUSIVE
+    assert outcome.reason_code == "BOLA_POLICY_PREFLIGHT_FAILED"
+    assert requests == []
+
+
+def test_bola_sanitizes_runtime_dynamic_key_in_affected_field_path():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("acct-a-1"):
+            return httpx.Response(200, json={"account_id": "acct-a-1"})
+        return httpx.Response(
+            200,
+            json={"acct-b-1": {"account_id": "acct-b-1"}},
+        )
+
+    outcome = BolaModule().run(execution_context(handler))
+
+    assert outcome.verdict is ModuleVerdict.VERIFIED
+    assert tuple(field.field_path for field in outcome.affected_fields) == (
+        "{account_id}.account_id",
+    )
+    assert "acct-b-1" not in repr(outcome)
+    assert "acct-b-1" not in repr(outcome.affected_fields)
+
+
+@pytest.mark.parametrize(
+    ("dynamic_key", "runtime_value", "expected_path"),
+    [
+        (
+            "record-acct-b-1",
+            "acct-b-1",
+            "record-{account_id}.account_id",
+        ),
+        (
+            "record-acct-a-1",
+            "acct-a-1",
+            "record-{runtime_value}.account_id",
+        ),
+    ],
+    ids=["embedded-user-b-id", "embedded-user-a-id"],
+)
+def test_bola_sanitizes_embedded_runtime_values_in_affected_field_path(
+    dynamic_key: str,
+    runtime_value: str,
+    expected_path: str,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("acct-a-1"):
+            return httpx.Response(200, json={"account_id": "acct-a-1"})
+        return httpx.Response(
+            200,
+            json={dynamic_key: {"account_id": "acct-b-1"}},
+        )
+
+    outcome = BolaModule().run(execution_context(handler))
+
+    assert outcome.verdict is ModuleVerdict.VERIFIED
+    assert tuple(field.field_path for field in outcome.affected_fields) == (
+        expected_path,
+    )
+    assert runtime_value not in repr(outcome)
+    assert runtime_value not in repr(outcome.affected_fields)
+
+
+def test_bola_does_not_follow_redirects_and_uses_exactly_two_transports():
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            302,
+            headers={"Location": "/api/final"},
+            request=request,
+        )
+
+    outcome = BolaModule().run(execution_context(handler))
+
+    assert outcome.verdict is ModuleVerdict.INCONCLUSIVE
+    assert requests == [
+        "/api/accounts/acct-a-1",
+        "/api/accounts/acct-b-1",
+    ]
+
+
+def test_bola_array_body_path_is_inconclusive_before_network():
+    requests: list[httpx.Request] = []
+    operation = Operation(
+        operation_id="get-account-array",
+        method="GET",
+        path_template="/api/accounts",
+        inputs=[
+            InputField(
+                location="body",
+                field_path="items[].account_id",
+                type="string",
+            )
+        ],
+        outputs=[],
+    )
+    step = ScanStep(
+        order=1,
+        candidate_id="candidate-bola-array",
+        module_id="BOLA-001",
+        target_operation_id=operation.operation_id,
+        target_endpoint=TargetEndpoint(
+            method="GET",
+            path_template=operation.path_template,
+        ),
+        input_bindings=[
+            InputBinding(
+                parameter="items[].account_id",
+                location="body",
+                binding_type="object_binding",
+                object_type="account",
+                owner="user_b",
+            )
+        ],
+    )
+
+    outcome = BolaModule().run(
+        execution_context(
+            lambda request: requests.append(request) or httpx.Response(200),
+            operation=operation,
+            step=step,
+        )
+    )
+
+    assert outcome.verdict is ModuleVerdict.INCONCLUSIVE
+    assert requests == []
 
 
 @pytest.mark.parametrize(
@@ -319,9 +481,13 @@ def test_bola_replaces_case_insensitive_bound_authorization_with_exact_user_a_he
         }
     )
     runtime = discovered_runtime()
-    runtime.parameter_examples[
-        ("get-account", "header", "authorization")
-    ] = {"Bearer attacker-token"}
+    SessionManager(cast(SafeHttpClient, None)).collect_response(
+        runtime,
+        actor_id="user_a",
+        operation_id="get-account",
+        body={},
+        observed_header={"authorization": "Bearer attacker-token"},
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(
