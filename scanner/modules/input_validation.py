@@ -120,7 +120,7 @@ class InputValidationModule:
             return _inconclusive("INPUT_POLICY_PREFLIGHT_FAILED")
 
         user_b_only = _user_b_only_values(context)
-        sensitive_values = _transport_sensitive_values(context, user_b_only)
+        sensitive_values = context.runtime.sensitive_values()
         baseline = _send(
             context,
             baseline_request,
@@ -326,22 +326,6 @@ def _user_b_only_values(
         if values:
             selected[object_type] = values
     return selected
-
-
-def _transport_sensitive_values(
-    context: ModuleExecutionContext,
-    user_b_only: dict[str, set[str]],
-) -> set[str]:
-    values = _reveal_values(context.runtime.credentials)
-    for session in context.runtime.sessions.values():
-        if session.token is not None:
-            values.update(_reveal_values((session.token,)))
-        values.update(_reveal_values(session.cookies.values()))
-    excluded = {item for items in user_b_only.values() for item in items}
-    for actor_objects in context.runtime.object_ids.values():
-        for identifiers in actor_objects.values():
-            values.update(_reveal_values(identifiers) - excluded)
-    return values
 
 
 def _expanded_scope_fields(

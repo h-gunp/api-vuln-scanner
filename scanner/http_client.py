@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urljoin
 
 import httpx
 
-from scanner.artifacts import Redactor, SENSITIVE_KEYS
+from scanner.artifacts import REDACTED, Redactor, SENSITIVE_KEYS
 from scanner.audit import AuditEvent, AuditSink
 from scanner.policy import PolicyEnforcer, PolicyViolation, RequestBudget
 
@@ -33,6 +34,35 @@ ROUTING_OVERRIDE_HEADERS = frozenset(
         "x-http-method",
         "x-method-override",
         "x-forwarded-method",
+    }
+)
+RESPONSE_SENSITIVE_KEYS = frozenset(
+    {
+        "password",
+        "passwd",
+        "password_hash",
+        "hashed_password",
+        "token",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "session_token",
+        "api_key",
+        "apikey",
+        "secret",
+        "client_secret",
+        "pin",
+        "cvv",
+        "cvc",
+        "card_security_code",
+        "resident_number",
+        "resident_registration_number",
+        "rrn",
+        "card_number",
+        "credit_card_number",
+        "pan",
+        "account_number",
+        "bank_account_number",
     }
 )
 
@@ -202,7 +232,10 @@ class SafeHttpClient:
                 body = None
                 runtime_body = None
             else:
-                body = self._redactor.redact(raw_body, sensitive_values)
+                body = self._redactor.redact(
+                    _redact_response_sensitive_fields(raw_body),
+                    sensitive_values,
+                )
                 runtime_body = _RuntimeJsonBody(raw_body)
             clean_headers = {
                 key.casefold(): self._redactor.redact(value, sensitive_values)
@@ -240,3 +273,35 @@ class SafeHttpClient:
                     details={},
                 )
             )
+
+
+def _redact_response_sensitive_fields(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                REDACTED
+                if (
+                    isinstance(key, str)
+                    and _is_response_sensitive_key(key)
+                    and not isinstance(item, (Mapping, list, tuple))
+                )
+                else _redact_response_sensitive_fields(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_response_sensitive_fields(item) for item in value]
+    return value
+
+
+def _is_response_sensitive_key(key: str) -> bool:
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake.casefold()).strip("_")
+    return (
+        normalized in RESPONSE_SENSITIVE_KEYS
+        or normalized.endswith("_password")
+        or normalized.endswith("_password_hash")
+        or normalized.endswith("_api_key")
+        or normalized.endswith("_secret")
+        or normalized.endswith("_pin")
+    )

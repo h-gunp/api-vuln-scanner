@@ -274,6 +274,21 @@ def test_data_exposure_success_without_forbidden_field_is_not_found():
     assert len(requests) == 1
 
 
+def test_data_exposure_json_null_success_is_not_found():
+    outcome = DataExposureModule().run(
+        execution_context(
+            lambda request: httpx.Response(
+                200,
+                content=b"null",
+                headers={"Content-Type": "application/json"},
+            )
+        )
+    )
+
+    assert outcome.verdict is ModuleVerdict.NOT_FOUND
+    assert outcome.reason_code == "DATA_FORBIDDEN_FIELD_ABSENT"
+
+
 def test_data_exposure_evidence_redacts_non_keyed_secret_response_values():
     outcome = DataExposureModule().run(
         execution_context(

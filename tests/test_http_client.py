@@ -404,6 +404,47 @@ def test_snapshot_keeps_raw_json_only_in_explicit_runtime_wrapper(
         assert value not in rendered
 
 
+def test_snapshot_public_json_redacts_all_data_exposure_categories(
+    profile: TargetProfile,
+):
+    raw_body = {
+        "password_hash": "$2b$12$custom-password-hash",
+        "accessToken": "custom-access-token",
+        "apiKey": "custom-api-key",
+        "clientSecret": "custom-client-secret",
+        "pin": "1234",
+        "cvv": "123",
+        "resident_registration_number": "900101-1234567",
+        "card_number": "4111111111111111",
+        "account_number": "110-123-456789",
+    }
+    client, _ = make_client(
+        profile,
+        lambda request: httpx.Response(200, json=raw_body),
+    )
+
+    snapshot = client.request(
+        "GET",
+        "http://vuln-bank.local/api/accounts",
+        module_id="DATA-001",
+    )
+
+    assert snapshot.json_body == {
+        key: "[REDACTED]" for key in raw_body
+    }
+    assert snapshot.runtime_json_body is not None
+    assert snapshot.runtime_json_body.reveal() == raw_body
+    rendered = (
+        repr(snapshot)
+        + str(snapshot)
+        + repr(snapshot.runtime_json_body)
+        + repr(dataclasses.asdict(snapshot))
+        + json.dumps(dataclasses.asdict(snapshot))
+    )
+    for value in raw_body.values():
+        assert value not in rendered
+
+
 def test_login_response_consumer_receives_raw_response_before_snapshot_redaction(
     profile: TargetProfile,
 ):

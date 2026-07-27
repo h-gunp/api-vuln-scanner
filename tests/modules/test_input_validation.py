@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+import json
 from collections.abc import Callable
 from typing import cast
 
@@ -23,6 +25,17 @@ from scanner.http_client import SafeHttpClient
 from scanner.modules.base import ModuleExecutionContext, ModuleVerdict
 from scanner.modules.input_validation import InputValidationModule
 from scanner.policy import PolicyEnforcer, RequestBudget
+
+
+class RecordingSafeHttpClient(SafeHttpClient):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.snapshots = []
+
+    def request(self, *args, **kwargs):
+        snapshot = super().request(*args, **kwargs)
+        self.snapshots.append(snapshot)
+        return snapshot
 
 
 def target_profile(*, allowed_paths: list[str] | None = None) -> TargetProfile:
@@ -159,6 +172,7 @@ def execution_context(
     target_operation: Operation | None = None,
     target_step: ScanStep | None = None,
     profile: TargetProfile | None = None,
+    client_class: type[SafeHttpClient] = SafeHttpClient,
 ) -> ModuleExecutionContext:
     profile = profile or target_profile()
     return ModuleExecutionContext(
@@ -167,7 +181,7 @@ def execution_context(
         operation=target_operation or operation(),
         step=target_step or step(),
         runtime=runtime or runtime_with_example("1"),
-        client=SafeHttpClient(
+        client=client_class(
             policy=PolicyEnforcer(profile),
             budget=RequestBudget(max_requests=10, requests_per_second=1000),
             transport=httpx.MockTransport(handler),
@@ -315,6 +329,46 @@ def test_input_verifies_invalid_success_that_introduces_user_b_only_object():
     assert "acct-b-1" not in repr(outcome.evidence)
     assert "token-a" not in repr(outcome.evidence)
     assert "acct-b-1" not in repr(outcome.evidence["variant"]["json_body"])
+
+
+def test_input_public_snapshots_hide_observed_query_and_b_only_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "1":
+            return httpx.Response(
+                200,
+                json={"items": [{"account_id": "acct-a-1"}]},
+            )
+        return httpx.Response(
+            200,
+            json={"items": [{"account_id": "acct-b-1"}]},
+        )
+
+    context = execution_context(handler, client_class=RecordingSafeHttpClient)
+
+    outcome = InputValidationModule().run(context)
+
+    assert outcome.verdict is ModuleVerdict.VERIFIED
+    client = cast(RecordingSafeHttpClient, context.client)
+    assert len(client.snapshots) == 2
+    assert client.snapshots[0].json_body == {
+        "items": [{"account_id": "[REDACTED]"}]
+    }
+    assert client.snapshots[1].json_body == {
+        "items": [{"account_id": "[REDACTED]"}]
+    }
+    assert client.snapshots[1].runtime_json_body is not None
+    assert client.snapshots[1].runtime_json_body.reveal() == {
+        "items": [{"account_id": "acct-b-1"}]
+    }
+    rendered = "".join(
+        repr(snapshot)
+        + str(snapshot)
+        + repr(dataclasses.asdict(snapshot))
+        + json.dumps(dataclasses.asdict(snapshot))
+        for snapshot in client.snapshots
+    )
+    for value in ("page=1", "acct-a-1", "acct-b-1"):
+        assert value not in rendered
 
 
 def test_input_verifies_invalid_success_that_introduces_sensitive_field():

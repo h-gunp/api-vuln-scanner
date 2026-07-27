@@ -97,9 +97,9 @@ class DataExposureModule:
             follow_redirects=False,
         )
         evidence = _evidence(context, response)
-        body = _runtime_json_body(response)
-        if not response.is_success or body is None:
+        if not response.is_success or response.runtime_json_body is None:
             return _inconclusive("DATA_RESPONSE_UNAVAILABLE", evidence)
+        body = response.runtime_json_body.reveal()
 
         matches = _sensitive_matches(body)
         if not matches:
