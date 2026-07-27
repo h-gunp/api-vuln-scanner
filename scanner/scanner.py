@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Callable, Literal, TypeVar, cast
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -17,6 +19,7 @@ from scanner.auth.session_manager import RuntimeContext, SessionManager
 from scanner.contracts import (
     ContractSource,
     DiscoveryJobRequest,
+    InputField,
     NormalizedApiGraph,
     Operation,
     OutputField,
@@ -56,6 +59,10 @@ OPENAPI_PATH_CANDIDATES = (
     "/api/swagger.json",
 )
 
+_HEX_SEGMENT = re.compile(r"^[0-9a-fA-F]{16,}$")
+_LIVE_FIELD_COMPONENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NUMERIC_SEGMENT = re.compile(r"^\d+$")
+_PATH_PARAMETER = re.compile(r"^\{([^{}\/]+)\}$")
 _DISCOVERY_MODULE_IDS = {
     PolicyModule.AUTHZ: "BOLA-001",
     PolicyModule.INPUT_VALIDATION: "INPUT-001",
@@ -275,6 +282,7 @@ class Scanner:
         graph = normalize_openapi(request.scan_id, openapi_document, runtime)
         graph = self._filter_graph(graph, profile, policy, module_id)
         graph = merge_katana_records(graph, katana_records)
+        graph = self._normalize_operation_paths(graph)
         graph = self._filter_graph(graph, profile, policy, module_id)
 
         self._check_cancellation(request, cancellation)
@@ -298,10 +306,6 @@ class Scanner:
             cancellation,
         )
         self._check_cancellation(request, cancellation)
-        graph = self._remove_sensitive_structure(
-            graph,
-            runtime.sensitive_values(),
-        )
         available_object_types = tuple(
             sorted(
                 {
@@ -319,7 +323,6 @@ class Scanner:
                 artifact_type="normalized_api_graph",
                 schema_version="1.1",
                 payload=graph.model_dump(mode="json"),
-                sensitive_values=runtime.sensitive_values(),
             )
         except Exception:
             self._fail(
@@ -569,7 +572,6 @@ class Scanner:
                         url,
                         module_id=module_id,
                         headers=session.authorization_headers(),
-                        sensitive_values=runtime.sensitive_values(),
                     )
                 except CancellationRequested:
                     self._cancelled(request)
@@ -589,23 +591,24 @@ class Scanner:
                     (field.field_path, field.type): field for field in inferred
                 }
         operations: list[Operation] = []
+        untrusted_runtime_components = self._untrusted_runtime_components(runtime)
         for operation in graph.operations:
             actor_outputs = observed_outputs.get(operation.operation_id, {})
-            shared_keys: set[tuple[str, str]] = set()
-            if set(actor_outputs) == {"user_a", "user_b"}:
-                shared_keys = set(actor_outputs["user_a"]) & set(
-                    actor_outputs["user_b"]
-                )
             merged_outputs = {
                 (output.field_path, output.type): output
                 for output in operation.outputs
             }
-            merged_outputs.update(
-                {
-                    key: actor_outputs["user_a"][key]
-                    for key in shared_keys
-                }
-            )
+            for outputs_by_key in actor_outputs.values():
+                merged_outputs.update(
+                    {
+                        key: output
+                        for key, output in outputs_by_key.items()
+                        if self._is_safe_live_output(
+                            output,
+                            untrusted_runtime_components,
+                        )
+                    }
+                )
             operations.append(
                 operation.model_copy(
                     update={
@@ -622,66 +625,159 @@ class Scanner:
         )
 
     @classmethod
-    def _remove_sensitive_structure(
+    def _normalize_operation_paths(
         cls,
         graph: NormalizedApiGraph,
-        sensitive_values: set[str],
     ) -> NormalizedApiGraph:
-        values = tuple(
-            sorted(
-                (value for value in sensitive_values if value),
-                key=len,
-                reverse=True,
-            )
-        )
-        operations: list[Operation] = []
+        normalized: dict[tuple[str, str], Operation] = {}
         for operation in graph.operations:
-            if cls._contains_sensitive_structure(
-                (
-                    operation.operation_id,
-                    operation.method,
-                    operation.path_template,
-                ),
-                values,
-            ):
-                continue
-            inputs = [
-                input_field
-                for input_field in operation.inputs
-                if not cls._contains_sensitive_structure(
-                    (
-                        input_field.location,
-                        input_field.field_path,
-                        input_field.type,
-                    ),
-                    values,
-                )
-            ]
-            outputs = [
-                output_field
-                for output_field in operation.outputs
-                if not cls._contains_sensitive_structure(
-                    (output_field.field_path, output_field.type),
-                    values,
-                )
-            ]
-            operations.append(
-                operation.model_copy(
-                    update={"inputs": inputs, "outputs": outputs}
-                )
+            path_template, generated_parameters = cls._generalize_path_template(
+                operation.path_template
             )
-        return NormalizedApiGraph(scan_id=graph.scan_id, operations=operations)
+            inputs = {
+                (input_field.location, input_field.field_path): input_field
+                for input_field in operation.inputs
+            }
+            inputs.update(
+                {
+                    ("path", parameter): InputField(
+                        location="path",
+                        field_path=parameter,
+                        type="string",
+                    )
+                    for parameter in generated_parameters
+                }
+            )
+            candidate = operation.model_copy(
+                update={
+                    "operation_id": f"{operation.method}:{path_template}",
+                    "path_template": path_template,
+                    "inputs": sorted(
+                        inputs.values(),
+                        key=lambda field: (field.location, field.field_path),
+                    ),
+                }
+            )
+            key = (candidate.method, candidate.path_template)
+            existing = normalized.get(key)
+            if existing is None:
+                normalized[key] = candidate
+                continue
+            merged_inputs = {
+                (field.location, field.field_path): field
+                for field in [*existing.inputs, *candidate.inputs]
+            }
+            merged_outputs = {
+                (field.field_path, field.type): field
+                for field in [*existing.outputs, *candidate.outputs]
+            }
+            normalized[key] = existing.model_copy(
+                update={
+                    "inputs": sorted(
+                        merged_inputs.values(),
+                        key=lambda field: (field.location, field.field_path),
+                    ),
+                    "outputs": sorted(
+                        merged_outputs.values(),
+                        key=lambda field: field.field_path,
+                    ),
+                }
+            )
+        return NormalizedApiGraph(
+            scan_id=graph.scan_id,
+            operations=sorted(
+                normalized.values(),
+                key=lambda operation: (
+                    operation.path_template,
+                    operation.method,
+                ),
+            ),
+        )
+
+    @classmethod
+    def _generalize_path_template(
+        cls,
+        path_template: str,
+    ) -> tuple[str, tuple[str, ...]]:
+        used_names = {
+            match.group(1)
+            for segment in path_template.split("/")
+            if (match := _PATH_PARAMETER.fullmatch(segment)) is not None
+        }
+        generated: list[str] = []
+        segments: list[str] = []
+        next_index = 1
+        for segment in path_template.split("/"):
+            if not cls._is_value_path_segment(segment):
+                segments.append(segment)
+                continue
+            while True:
+                name = "id" if next_index == 1 else f"id_{next_index}"
+                next_index += 1
+                if name not in used_names:
+                    break
+            used_names.add(name)
+            generated.append(name)
+            segments.append(f"{{{name}}}")
+        return "/".join(segments), tuple(generated)
 
     @staticmethod
-    def _contains_sensitive_structure(
-        structural_values: tuple[str, ...],
-        sensitive_values: tuple[str, ...],
+    def _is_value_path_segment(segment: str) -> bool:
+        if (
+            _NUMERIC_SEGMENT.fullmatch(segment) is not None
+            or _HEX_SEGMENT.fullmatch(segment) is not None
+        ):
+            return True
+        if len(segment) != 36:
+            return False
+        try:
+            parsed = UUID(segment)
+        except ValueError:
+            return False
+        return str(parsed) == segment.casefold()
+
+    @classmethod
+    def _is_safe_live_output(
+        cls,
+        output: OutputField,
+        untrusted_runtime_components: set[str],
     ) -> bool:
-        return any(
-            sensitive_value in structural_value
-            for structural_value in structural_values
-            for sensitive_value in sensitive_values
+        for raw_component in output.field_path.split("."):
+            component = raw_component
+            while component.endswith("[]"):
+                component = component[:-2]
+            if (
+                _LIVE_FIELD_COMPONENT.fullmatch(component) is None
+                or cls._is_value_path_segment(component)
+                or component in untrusted_runtime_components
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _untrusted_runtime_components(runtime: RuntimeContext) -> set[str]:
+        values: set[str] = set()
+        values.update(
+            value
+            for credential in runtime.credentials
+            if len(value := credential.reveal()) > 3
         )
+        for session in runtime.sessions.values():
+            if session.token is not None:
+                token = session.token.reveal()
+                if len(token) > 3:
+                    values.add(token)
+            values.update(
+                value
+                for cookie in session.cookies.values()
+                if len(value := cookie.reveal()) > 3
+            )
+        for actor_objects in runtime.object_ids.values():
+            for identifiers in actor_objects.values():
+                values.update(identifier.reveal() for identifier in identifiers)
+        for examples in runtime.parameter_examples.values():
+            values.update(example.reveal() for example in examples)
+        return values
 
     @staticmethod
     def _is_list_operation(

@@ -713,23 +713,56 @@ def test_openapi_and_katana_operations_are_refiltered_before_graph_publish() -> 
     assert all(operation.method == "GET" for operation in outcome.graph.operations)
 
 
-def test_actor_specific_response_keys_and_runtime_paths_never_enter_graph() -> None:
+def test_openapi_paths_generalize_value_segments_without_credential_substrings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     backend = RecordingBackend()
+    monkeypatch.setenv("USER_A_USERNAME", "api")
+    monkeypatch.setenv("USER_A_PASSWORD", "id")
+    uuid_v7 = "01890abc-def0-7abc-8def-0123456789ab"
 
     document = {
         "openapi": "3.1.0",
         "paths": {
-            "/api/accounts": {
+            "/api/users/42": {
                 "get": {
                     "responses": {
-                        "200": {"description": "runtime shape"}
+                        "200": {
+                            "description": "numeric concrete path",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string"},
+                                            "api_status": {"type": "string"},
+                                        },
+                                    }
+                                }
+                            },
+                        }
                     }
                 }
             },
-            "/api/accounts/account-a-secret": {
+            f"/api/audit/{uuid_v7}": {
                 "get": {
                     "responses": {
-                        "200": {"description": "concrete runtime path"}
+                        "200": {"description": "uuid concrete path"}
+                    }
+                }
+            },
+            "/api/users/{user_id}": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "user_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {
+                        "200": {"description": "declared template"}
                     }
                 }
             },
@@ -741,28 +774,12 @@ def test_actor_specific_response_keys_and_runtime_paths_never_enter_graph() -> N
             username = json.loads(request.content)["username"]
             return httpx.Response(
                 200,
-                json={"access_token": f"token-{username[-1]}"},
+                json={"access_token": f"token-{len(username)}"},
                 request=request,
             )
         if request.url.path == "/openapi.json":
             return httpx.Response(200, json=document, request=request)
-        if request.url.path == "/api/accounts":
-            actor = request.headers["authorization"][-1]
-            account_id = f"account-{actor}-secret"
-            return httpx.Response(
-                200,
-                json={
-                    "common": {"status": "ok"},
-                    account_id: {"balance": 10},
-                    "items": [{"account_id": account_id}],
-                },
-                request=request,
-            )
-        return httpx.Response(
-            200,
-            json={"common": {"status": "ok"}},
-            request=request,
-        )
+        return httpx.Response(200, json={}, request=request)
 
     scanner = Scanner(
         backend,
@@ -778,12 +795,145 @@ def test_actor_specific_response_keys_and_runtime_paths_never_enter_graph() -> N
         )
     )
 
-    assert [
-        operation.path_template for operation in outcome.graph.operations
-    ] == ["/api/accounts"]
-    assert {
+    paths = {
+        operation.path_template: operation for operation in outcome.graph.operations
+    }
+    assert set(paths) == {
+        "/api/audit/{id}",
+        "/api/users/{id}",
+        "/api/users/{user_id}",
+    }
+    assert paths["/api/audit/{id}"].operation_id == "GET:/api/audit/{id}"
+    assert paths["/api/users/{id}"].operation_id == "GET:/api/users/{id}"
+    assert {field.field_path for field in paths["/api/users/{id}"].outputs} >= {
+        "id",
+        "api_status",
+    }
+    rendered = (
+        outcome.graph.model_dump_json()
+        + backend.published[0].content.decode()
+        + repr(backend.__dict__)
+        + repr(scanner)
+    )
+    for secret in ("token-3", "password-b", uuid_v7):
+        assert secret not in rendered
+    assert "/42" not in rendered
+    assert "/api/" in rendered
+    assert '"field_path":"id"' in outcome.graph.model_dump_json()
+    assert b'"field_path":"id"' in backend.published[0].content
+
+
+def test_live_output_union_keeps_names_and_rejects_dynamic_mapping_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = RecordingBackend()
+    monkeypatch.setenv("USER_A_PASSWORD", "id")
+    monkeypatch.setenv("USER_B_PASSWORD", "id")
+    dynamic_uuid = "01890abc-def0-7abc-8def-0123456789ab"
+    dynamic_hex = "abcdef0123456789"
+    runtime_object_id = "shared_secret_key"
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/accounts": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "declared structure",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "declared-hyphen": {
+                                                "type": "string"
+                                            }
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            username = json.loads(request.content)["username"]
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": f"session_secret_{username[-1]}"
+                },
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=document, request=request)
+        if request.url.path == "/api/accounts":
+            is_actor_a = (
+                request.headers["authorization"] == "Bearer session_secret_a"
+            )
+            session_key = (
+                "session_secret_a" if is_actor_a else "session_secret_b"
+            )
+            body = {
+                "common": {"status": "ok"},
+                "id": "ordinary-id-value",
+                "account_id": runtime_object_id,
+                runtime_object_id: {"balance": 10},
+                "shared-dynamic-key": {"value": 1},
+                dynamic_uuid: {"value": 1},
+                dynamic_hex: {"value": 1},
+                "123": {"value": 1},
+                session_key: {"value": 1},
+            }
+            body["ssn" if is_actor_a else "admin_note"] = (
+                "111-22-3333" if is_actor_a else "admin-secret-value"
+            )
+            return httpx.Response(200, json=body, request=request)
+        return httpx.Response(404, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(
+            ContractSource(
+                inline=profile_payload(sources=["openapi"])
+            )
+        )
+    )
+
+    output_paths = {
         field.field_path for field in outcome.graph.operations[0].outputs
-    } >= {"common", "common.status"}
+    }
+    assert output_paths >= {
+        "declared-hyphen",
+        "common",
+        "common.status",
+        "id",
+        "account_id",
+        "ssn",
+        "admin_note",
+    }
+    for rejected in (
+        runtime_object_id,
+        "shared-dynamic-key",
+        dynamic_uuid,
+        dynamic_hex,
+        "123",
+        "session_secret_a",
+        "session_secret_b",
+    ):
+        assert all(
+            rejected not in field_path for field_path in output_paths
+        )
+
     rendered = (
         outcome.graph.model_dump_json()
         + backend.published[0].content.decode()
@@ -791,12 +941,14 @@ def test_actor_specific_response_keys_and_runtime_paths_never_enter_graph() -> N
         + repr(scanner)
     )
     for secret in (
-        "account-a-secret",
-        "account-b-secret",
-        "token-a",
-        "token-b",
-        "password-a",
-        "password-b",
+        runtime_object_id,
+        dynamic_uuid,
+        dynamic_hex,
+        "111-22-3333",
+        "admin-secret-value",
+        "ordinary-id-value",
+        "session_secret_a",
+        "session_secret_b",
     ):
         assert secret not in rendered
 
