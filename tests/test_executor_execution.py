@@ -24,6 +24,7 @@ from scanner.executor import Executor
 from scanner.http_client import SafeHttpClient
 from scanner.integration.backend_client import FakeBackendClient
 from scanner.modules.base import ModuleOutcome, ModuleVerdict
+from scanner.modules.data_exposure import DataExposureModule
 from scanner.policy import CancellationGuard, PolicyEnforcer, RequestBudget
 
 
@@ -763,6 +764,68 @@ def test_matching_runtime_secret_operation_ids_are_rejected_before_transport() -
     result, backend, audit, budget, transport_calls = _execute(
         documents,
         modules={"DATA-001": module},
+    )
+
+    assert result.findings == []
+    assert module.calls == []
+    assert transport_calls == []
+    assert budget.requests_used == 3
+    assert backend.error_reports[-1].code == "EXECUTION_STEP_INVALID"
+    assert "runtime-token-a" not in repr((result, backend.error_reports, audit.events))
+
+
+def test_actual_data_module_rejects_runtime_secret_path_before_transport() -> None:
+    documents = _documents(("DATA-001",))
+    documents.graph.operations[0].path_template = "/api/runtime-token-a"
+    documents.plan.steps[0].target_endpoint.path_template = (
+        "/api/runtime-token-a"
+    )
+
+    result, backend, audit, budget, transport_calls = _execute(
+        documents,
+        modules={"DATA-001": DataExposureModule()},
+    )
+
+    assert result.findings == []
+    assert transport_calls == []
+    assert budget.requests_used == 3
+    assert backend.error_reports[-1].code == "EXECUTION_STEP_INVALID"
+    assert "runtime-token-a" not in repr((result, backend.error_reports, audit.events))
+
+
+def test_normal_path_is_not_rejected_when_only_contained_by_longer_runtime_value() -> None:
+    documents = _documents(("DATA-001",))
+    runtime = _runtime()
+    runtime.sessions["user_a"] = ActorSession(
+        actor_id="user_a",
+        token="prefix-/api/profile-suffix",
+    )
+
+    result, backend, _, budget, transport_calls = _execute(
+        documents,
+        modules={"DATA-001": DataExposureModule()},
+        runtime=runtime,
+    )
+
+    assert result.findings == []
+    assert len(transport_calls) == 1
+    assert transport_calls[0].url.path == "/api/profile"
+    assert budget.requests_used == 4
+    assert backend.error_reports == []
+
+
+def test_matching_runtime_secret_input_binding_names_are_rejected_before_module() -> None:
+    documents = _documents(("INPUT-001",))
+    documents.graph.operations[0].inputs[0].field_path = "runtime-token-a"
+    documents.analysis.test_candidates[0].binding_hints[0].parameter = (
+        "runtime-token-a"
+    )
+    documents.plan.steps[0].input_bindings[0].parameter = "runtime-token-a"
+    module = FixedOutcomeModule(_not_found("VERIFY-INPUT-001"), requests=1)
+
+    result, backend, audit, budget, transport_calls = _execute(
+        documents,
+        modules={"INPUT-001": module},
     )
 
     assert result.findings == []

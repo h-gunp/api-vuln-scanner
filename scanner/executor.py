@@ -783,14 +783,26 @@ def _step_external_identifiers_are_safe(
     candidate: TestCandidate | None,
     sensitive_values: set[str],
 ) -> bool:
-    values = [step.candidate_id, step.target_operation_id]
+    values = [
+        step.candidate_id,
+        step.target_operation_id,
+        step.target_endpoint.path_template,
+        *(binding.parameter for binding in step.input_bindings),
+    ]
     if operation is not None:
-        values.append(operation.operation_id)
+        values.extend(
+            (
+                operation.operation_id,
+                operation.path_template,
+                *(input_field.field_path for input_field in operation.inputs),
+            )
+        )
     if candidate is not None:
         values.extend(
             (
                 candidate.candidate_id,
                 candidate.target_operation_id,
+                *(hint.parameter for hint in candidate.binding_hints),
             )
         )
     return all(
