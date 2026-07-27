@@ -131,14 +131,20 @@ class RuntimeContext(_RuntimeOnly):
         return values
 
     def structural_identifier_values(self) -> frozenset[_RuntimeSecret]:
-        """Return repr-safe object identifiers used to reject dynamic structure."""
+        """Return repr-safe runtime secrets that may not become structure."""
 
-        return frozenset(
+        values = set(self.credentials)
+        for session in self.sessions.values():
+            if session.token:
+                values.add(session.token)
+            values.update(session.cookies.values())
+        values.update(
             identifier
             for actor_objects in self.object_ids.values()
             for identifiers in actor_objects.values()
             for identifier in identifiers
         )
+        return frozenset(values)
 
 
 class SessionManager:

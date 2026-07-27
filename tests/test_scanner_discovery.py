@@ -9,7 +9,11 @@ import pytest
 
 from scanner.artifacts import ArtifactEnvelope
 from scanner.audit import InMemoryAuditSink
-from scanner.auth.session_manager import ActorSession
+from scanner.auth.session_manager import (
+    ActorSession,
+    SessionManager,
+    _RuntimeSecret,
+)
 from scanner.contracts import ContractSource, DiscoveryJobRequest, TargetProfile
 from scanner.crawler.katana_runner import KatanaError, KatanaRecord, KatanaRunResult
 from scanner.integration.backend_client import FakeBackendClient, ScannerStage
@@ -1177,9 +1181,40 @@ def test_object_id_openapi_placeholder_is_renamed_with_matching_path_input() -> 
     assert runtime_object_id not in rendered
 
 
-def test_authoritative_fields_matching_session_token_are_preserved() -> None:
+@pytest.mark.parametrize(
+    ("secret_kind", "runtime_secret"),
+    [
+        ("token", "opaque-session-field"),
+        ("credential", "credential-field-name"),
+        ("cookie", "cookie-field-name"),
+    ],
+)
+def test_structural_runtime_secret_fields_are_absent_from_graph_and_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    secret_kind: str,
+    runtime_secret: str,
+) -> None:
     backend = RecordingBackend()
-    session_token = "opaque-session-field"
+    if secret_kind == "credential":
+        monkeypatch.setenv("USER_A_PASSWORD", runtime_secret)
+    if secret_kind == "cookie":
+        original_authenticate = SessionManager.authenticate
+
+        def authenticate_with_cookie(
+            manager: SessionManager,
+            profile: TargetProfile,
+        ):
+            runtime = original_authenticate(manager, profile)
+            runtime.sessions["user_a"].cookies["sid"] = _RuntimeSecret(
+                runtime_secret
+            )
+            return runtime
+
+        monkeypatch.setattr(
+            SessionManager,
+            "authenticate",
+            authenticate_with_cookie,
+        )
     document = {
         "openapi": "3.1.0",
         "paths": {
@@ -1187,7 +1222,7 @@ def test_authoritative_fields_matching_session_token_are_preserved() -> None:
                 "get": {
                     "parameters": [
                         {
-                            "name": session_token,
+                            "name": runtime_secret,
                             "in": "query",
                             "schema": {"type": "string"},
                         },
@@ -1205,7 +1240,7 @@ def test_authoritative_fields_matching_session_token_are_preserved() -> None:
                                     "schema": {
                                         "type": "object",
                                         "properties": {
-                                            session_token: {"type": "string"},
+                                            runtime_secret: {"type": "string"},
                                             "id": {"type": "string"},
                                             "api_status": {"type": "string"},
                                         },
@@ -1223,7 +1258,13 @@ def test_authoritative_fields_matching_session_token_are_preserved() -> None:
         if request.method == "POST":
             return httpx.Response(
                 200,
-                json={"access_token": session_token},
+                json={
+                    "access_token": (
+                        runtime_secret
+                        if secret_kind == "token"
+                        else "ordinary-token"
+                    )
+                },
                 request=request,
             )
         if request.url.path == "/openapi.json":
@@ -1245,26 +1286,20 @@ def test_authoritative_fields_matching_session_token_are_preserved() -> None:
     )
 
     operation = outcome.graph.operations[0]
-    assert {field.field_path for field in operation.inputs} == {
-        "id",
-        session_token,
-    }
+    assert {field.field_path for field in operation.inputs} == {"id"}
     assert {field.field_path for field in operation.outputs} == {
         "api_status",
         "id",
-        session_token,
     }
     artifact_graph = json.loads(backend.published[0].content)
     artifact_operation = artifact_graph["operations"][0]
-    assert {field["field_path"] for field in artifact_operation["inputs"]} == {
-        "id",
-        session_token,
-    }
+    assert {field["field_path"] for field in artifact_operation["inputs"]} == {"id"}
     assert {field["field_path"] for field in artifact_operation["outputs"]} == {
         "api_status",
         "id",
-        session_token,
     }
+    assert runtime_secret not in outcome.graph.model_dump_json()
+    assert runtime_secret not in backend.published[0].content.decode()
 
 
 def test_katana_query_values_do_not_delete_authoritative_fields_but_object_id_does() -> None:

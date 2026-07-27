@@ -15,6 +15,7 @@ from scanner.auth.session_manager import (
     AuthenticationError,
     RuntimeContext,
     SessionManager,
+    _RuntimeSecret,
 )
 from scanner.contracts import TargetProfile
 from scanner.http_client import SafeHttpClient
@@ -276,7 +277,27 @@ def test_authenticate_supports_custom_token_field_without_snapshot_leakage():
 
 def test_collect_response_keeps_object_ids_and_examples_private():
     profile, manager, _ = make_manager(lambda request: httpx.Response(200))
-    runtime = RuntimeContext(scan_id=profile.scan_id)
+    runtime = RuntimeContext(
+        scan_id=profile.scan_id,
+        credentials={_RuntimeSecret("credential-a")},
+        sessions={
+            "user_a": ActorSession(
+                actor_id="user_a",
+                token="token-a",
+                cookies={"sid": "cookie-a"},
+            )
+        },
+        parameter_examples={
+            ("GET:/api/accounts", "query", "sort"): {
+                _RuntimeSecret("status")
+            }
+        },
+        openapi_parameter_examples={
+            ("GET:/api/accounts", "query", "sort"): {
+                _RuntimeSecret("status")
+            }
+        },
+    )
 
     manager.collect_response(
         runtime,
@@ -297,14 +318,30 @@ def test_collect_response_keeps_object_ids_and_examples_private():
     assert runtime.observed_parameter_examples[
         ("GET:/api/accounts", "query", "page")
     ] == {"1"}
-    assert runtime.openapi_parameter_examples == {}
+    assert runtime.openapi_parameter_examples[
+        ("GET:/api/accounts", "query", "sort")
+    ] == {"status"}
     assert runtime.sensitive_values() >= {"acct-b-1", "41", "card-b-1", "1"}
     structural_values = runtime.structural_identifier_values()
     assert {
         value.reveal() for value in structural_values
-    } == {"acct-b-1", "41", "card-b-1"}
-    assert "1" not in repr(structural_values)
-    assert "acct-b-1" not in repr(structural_values)
+    } == {
+        "credential-a",
+        "token-a",
+        "cookie-a",
+        "acct-b-1",
+        "41",
+        "card-b-1",
+    }
+    for hidden in (
+        "credential-a",
+        "token-a",
+        "cookie-a",
+        "acct-b-1",
+        "status",
+        "1",
+    ):
+        assert hidden not in repr(structural_values)
 
     assert "acct-b-1" not in repr(runtime)
     assert "card-b-1" not in repr(runtime)
