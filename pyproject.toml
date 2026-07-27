@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vuln-bank-llm"
+version = "0.1.0"
+description = "Schema-first LLM stages for the vuln-bank scanner pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.42.0,<3",
+    "pydantic>=2.8,<3",
+]
+
+[tool.setuptools]
+packages = ["llm"]
