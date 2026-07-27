@@ -82,6 +82,84 @@ def test_rejected_policy_never_reaches_transport(profile: TargetProfile):
     assert budget.requests_used == 0
 
 
+@pytest.mark.parametrize(
+    ("method", "url", "module_id", "is_login", "is_state_change"),
+    [
+        ("GET", "http://vuln-bank.local/api/accounts", "AUTHN-001", False, False),
+        ("GET", "http://vuln-bank.local/api/accounts", "TRANSACTION-001", False, False),
+        ("GET", "http://vuln-bank.local/api/accounts", "UNKNOWN-001", False, False),
+        ("GET", "http://vuln-bank.local/api/accounts", "BOLA-001", False, True),
+        ("POST", "http://vuln-bank.local/api/login", None, True, True),
+        ("GET", "http://vuln-bank.local/api/%2e%2e/admin", "BOLA-001", False, False),
+    ],
+)
+def test_unsafe_requests_never_reach_transport(
+    profile: TargetProfile, method: str, url: str, module_id: str | None, is_login: bool, is_state_change: bool
+):
+    calls = []
+    client, budget = make_client(profile, lambda request: calls.append(request) or httpx.Response(200))
+
+    with pytest.raises(PolicyViolation):
+        client.request(
+            method,
+            url,
+            module_id=module_id,
+            is_login=is_login,
+            is_state_change=is_state_change,
+        )
+
+    assert calls == []
+    assert budget.requests_used == 0
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Host": "attacker.local"},
+        {"X-HTTP-Method-Override": "POST"},
+        {"X-Original-URL": "/private/accounts"},
+        {"Forwarded": "host=attacker.local;proto=https"},
+        {"X-Forwarded-Host": "attacker.local"},
+    ],
+)
+def test_routing_override_headers_never_reach_transport(profile: TargetProfile, headers: dict[str, str]):
+    calls = []
+    client, budget = make_client(profile, lambda request: calls.append(request) or httpx.Response(200))
+
+    with pytest.raises(PolicyViolation):
+        client.request(
+            "GET",
+            "http://vuln-bank.local/api/accounts",
+            module_id="BOLA-001",
+            headers=headers,
+        )
+
+    assert calls == []
+    assert budget.requests_used == 0
+
+
+def test_authorization_and_cookie_work_for_allowed_request_but_not_snapshot(profile: TargetProfile):
+    received_headers = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received_headers.update(request.headers)
+        return httpx.Response(200, headers={"X-Trace": "safe"}, json={"ok": True})
+
+    client, _ = make_client(profile, handler)
+    snapshot = client.request(
+        "GET",
+        "http://vuln-bank.local/api/accounts",
+        module_id="BOLA-001",
+        headers={"Authorization": "Bearer token-a", "Cookie": "sid-a"},
+        sensitive_values={"token-a", "sid-a"},
+    )
+
+    assert received_headers["authorization"] == "Bearer token-a"
+    assert received_headers["cookie"] == "sid-a"
+    assert "authorization" not in snapshot.headers
+    assert "cookie" not in snapshot.headers
+
+
 def test_allowed_get_reaches_transport_once_and_consumes_budget(profile: TargetProfile):
     calls = []
     client, budget = make_client(
@@ -130,6 +208,21 @@ def test_rejected_redirect_never_reaches_second_transport(
         client.request("GET", "http://vuln-bank.local/api/start", module_id="BOLA-001")
 
     assert len(calls) == 1
+    assert budget.requests_used == 1
+
+
+def test_encoded_traversal_redirect_never_reaches_second_transport(profile: TargetProfile):
+    calls = []
+    client, budget = make_client(
+        profile,
+        lambda request: calls.append(str(request.url))
+        or httpx.Response(302, headers={"Location": "/api/%2e%2e/admin"}, request=request),
+    )
+
+    with pytest.raises(PolicyViolation):
+        client.request("GET", "http://vuln-bank.local/api/start", module_id="BOLA-001")
+
+    assert calls == ["http://vuln-bank.local/api/start"]
     assert budget.requests_used == 1
 
 

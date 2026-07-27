@@ -81,6 +81,17 @@ def test_login_bypasses_active_method_only(profile: TargetProfile, policy: Polic
         )
 
 
+def test_login_cannot_bypass_state_change_denial(policy: PolicyEnforcer):
+    with pytest.raises(PolicyViolation):
+        policy.authorize(
+            "POST",
+            "http://vuln-bank.local/api/login",
+            module_id=None,
+            is_login=True,
+            is_state_change=True,
+        )
+
+
 def test_authn_transaction_and_post_probe_are_denied(
     profile: TargetProfile, policy: PolicyEnforcer
 ):
@@ -107,6 +118,8 @@ def test_authn_transaction_and_post_probe_are_denied(
     "url",
     [
         "http://vuln-bank.local/api/../admin",
+        "http://vuln-bank.local/api/%2e%2e/admin",
+        "http://vuln-bank.local/api/%2F..%2Fadmin",
         "http://user@vuln-bank.local/api/accounts",
         "http://vuln-bank.local/api/accounts#fragment",
         "https://vuln-bank.local/api/accounts",
@@ -201,3 +214,16 @@ def test_katana_lease_exclusively_reserves_and_consumes_full_allowance():
     assert budget.requests_used == 2
     budget.reserve()
     assert budget.requests_used == 3
+
+
+def test_katana_lease_allowance_is_immutable_and_restore_is_blocked_while_leased():
+    budget = RequestBudget(max_requests=3, requests_per_second=100, clock=lambda: 0.0)
+    lease = budget.lease(2)
+
+    with pytest.raises(AttributeError):
+        lease.max_requests = 99
+    with pytest.raises(ValueError, match="lease"):
+        budget.restore(3)
+
+    lease.close()
+    assert budget.requests_used == 2

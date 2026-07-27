@@ -14,6 +14,29 @@ from scanner.audit import AuditEvent, AuditSink
 from scanner.policy import PolicyEnforcer, PolicyViolation, RequestBudget
 
 
+ROUTING_OVERRIDE_HEADERS = frozenset(
+    {
+        "host",
+        "authority",
+        ":authority",
+        "forwarded",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-forwarded-port",
+        "x-forwarded-uri",
+        "x-forwarded-url",
+        "x-forwarded-prefix",
+        "x-original-url",
+        "x-original-uri",
+        "x-rewrite-url",
+        "x-http-method-override",
+        "x-http-method",
+        "x-method-override",
+        "x-forwarded-method",
+    }
+)
+
+
 class ScannerRequestError(Exception):
     """A sanitized transport failure that contains no target runtime values."""
 
@@ -66,6 +89,7 @@ class SafeHttpClient:
 
         while True:
             try:
+                self._validate_headers(headers)
                 self._policy.authorize(
                     method,
                     current_url,
@@ -112,6 +136,13 @@ class SafeHttpClient:
             json_body=self._redactor.redact(body, sensitive_values),
             url=self._redactor.redact(str(response.url), sensitive_values),
         )
+
+    @staticmethod
+    def _validate_headers(headers: Mapping[str, str] | None) -> None:
+        if headers is not None and any(
+            name.casefold() in ROUTING_OVERRIDE_HEADERS for name in headers
+        ):
+            raise PolicyViolation("request violates scanner safety policy")
 
     def _emit(self, code: str) -> None:
         if self._audit_sink is not None:

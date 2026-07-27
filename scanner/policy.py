@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import posixpath
 import time
-from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Callable
 from urllib.parse import SplitResult, urlsplit
@@ -66,6 +65,9 @@ class PolicyEnforcer:
         ):
             raise PolicyViolation("request violates scanner safety policy")
 
+        if is_state_change:
+            raise PolicyViolation("request violates scanner safety policy")
+
         if is_login:
             if (
                 request_method != self._profile.authentication.login.method
@@ -75,7 +77,7 @@ class PolicyEnforcer:
                 raise PolicyViolation("request violates scanner safety policy")
             return
 
-        if is_state_change or self._profile.safety_policy.state_change_policy != "deny":
+        if self._profile.safety_policy.state_change_policy != "deny":
             # The current strict contract permits only a deny policy.  Keep the
             # explicit state-change guard at this boundary if that evolves.
             raise PolicyViolation("request violates scanner safety policy")
@@ -106,6 +108,11 @@ class PolicyEnforcer:
 
     def _normalized_path(self, parsed: SplitResult) -> str:
         path = parsed.path or "/"
+        if "%" in path:
+            # Percent-encoded separators and dot segments can be decoded by a
+            # downstream server differently from urllib's parsed path. Refuse
+            # this ambiguous form instead of matching it against a wildcard.
+            raise PolicyViolation("request violates scanner safety policy")
         parts = path.split("/")
         if ".." in parts:
             raise PolicyViolation("request violates scanner safety policy")
@@ -143,6 +150,8 @@ class RequestBudget:
         return self._requests_used
 
     def restore(self, value: int) -> None:
+        if self._active_lease is not None:
+            raise ValueError("request count cannot be restored while a lease is active")
         if isinstance(value, bool) or not isinstance(value, int) or value < self._requests_used:
             raise ValueError("request count cannot decrease")
         self._requests_used = value
@@ -168,7 +177,7 @@ class RequestBudget:
 
     def _close_lease(self, lease: "BudgetLease") -> None:
         if self._active_lease is lease:
-            self._requests_used += lease.max_requests
+            self._requests_used += lease._allowance
             self._active_lease = None
 
     def _raise_if_cancelled(self) -> None:
@@ -186,13 +195,24 @@ class RequestBudget:
         self._last_request_at = now
 
 
-@dataclass
 class BudgetLease:
-    _budget: RequestBudget
-    max_requests: int
-    _closed: bool = False
+    __slots__ = ("_budget", "_allowance", "_closed")
+
+    def __init__(self, budget: RequestBudget, allowance: int) -> None:
+        object.__setattr__(self, "_budget", budget)
+        object.__setattr__(self, "_allowance", allowance)
+        object.__setattr__(self, "_closed", False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in {"_allowance", "max_requests"} and hasattr(self, "_allowance"):
+            raise AttributeError("lease allowance is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def max_requests(self) -> int:
+        return self._allowance
 
     def close(self) -> None:
         if not self._closed:
             self._budget._close_lease(self)
-            self._closed = True
+            object.__setattr__(self, "_closed", True)
