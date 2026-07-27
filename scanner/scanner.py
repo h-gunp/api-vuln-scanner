@@ -1185,7 +1185,7 @@ class Scanner:
         return {
             identifier.reveal()
             for identifier in runtime.structural_identifier_values()
-            if len(identifier.reveal()) >= _MIN_RUNTIME_COMPONENT_LENGTH
+            if identifier.reveal()
         }
 
     @staticmethod
@@ -1193,7 +1193,7 @@ class Scanner:
         return {
             value
             for value in runtime.sensitive_values()
-            if len(value) >= _MIN_RUNTIME_COMPONENT_LENGTH
+            if value
         }
 
     @staticmethod

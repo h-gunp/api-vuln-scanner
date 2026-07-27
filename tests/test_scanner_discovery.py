@@ -757,8 +757,8 @@ def test_openapi_paths_generalize_value_segments_without_credential_substrings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = RecordingBackend()
-    monkeypatch.setenv("USER_A_USERNAME", "api")
-    monkeypatch.setenv("USER_A_PASSWORD", "id")
+    monkeypatch.setenv("USER_A_USERNAME", "pi")
+    monkeypatch.setenv("USER_A_PASSWORD", "d")
     uuid_v7 = "01890abc-def0-7abc-8def-0123456789ab"
 
     document = {
@@ -855,7 +855,7 @@ def test_openapi_paths_generalize_value_segments_without_credential_substrings(
         + repr(backend.__dict__)
         + repr(scanner)
     )
-    for secret in ("token-3", "password-b", uuid_v7):
+    for secret in ("token-2", "password-b", uuid_v7):
         assert secret not in rendered
     assert "/42" not in rendered
     assert "/api/" in rendered
@@ -1302,6 +1302,186 @@ def test_structural_runtime_secret_fields_are_absent_from_graph_and_artifact(
     assert runtime_secret not in backend.published[0].content.decode()
 
 
+def test_short_structural_runtime_secrets_are_removed_and_path_is_generalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = RecordingBackend()
+    monkeypatch.setenv("USER_A_PASSWORD", "pw")
+    original_authenticate = SessionManager.authenticate
+
+    def authenticate_with_cookie(
+        manager: SessionManager,
+        profile: TargetProfile,
+    ):
+        runtime = original_authenticate(manager, profile)
+        runtime.sessions["user_a"].cookies["sid"] = _RuntimeSecret("ck")
+        return runtime
+
+    monkeypatch.setattr(
+        SessionManager,
+        "authenticate",
+        authenticate_with_cookie,
+    )
+    short_components = ("pw", "tk", "ck", "42")
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/accounts": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": component,
+                            "in": "query",
+                            "schema": {"type": "string"},
+                        }
+                        for component in (*short_components, "safe")
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "authoritative fields",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            component: {"type": "string"}
+                                            for component in (
+                                                *short_components,
+                                                "safe",
+                                                "account_id",
+                                            )
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "/api/secrets/{pw}/{tk}/{ck}/{42}": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": component,
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                        for component in short_components
+                    ],
+                    "responses": {
+                        "200": {"description": "authoritative path"}
+                    },
+                }
+            },
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"access_token": "tk"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=document, request=request)
+        if request.url.path == "/api/accounts":
+            return httpx.Response(
+                200,
+                json={"account_id": 42, "safe": "ok"},
+                request=request,
+            )
+        return httpx.Response(200, json={}, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(records=()),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload(sources=["openapi"])))
+    )
+
+    operations = {
+        operation.path_template: operation for operation in outcome.graph.operations
+    }
+    assert set(operations) == {
+        "/api/accounts",
+        "/api/secrets/{id}/{id_2}/{id_3}/{id_4}",
+    }
+    assert {field.field_path for field in operations["/api/accounts"].inputs} == {
+        "safe"
+    }
+    assert {field.field_path for field in operations["/api/accounts"].outputs} == {
+        "account_id",
+        "safe",
+    }
+    assert {
+        field.field_path
+        for field in operations[
+            "/api/secrets/{id}/{id_2}/{id_3}/{id_4}"
+        ].inputs
+    } == {"id", "id_2", "id_3", "id_4"}
+    artifact_graph = json.loads(backend.published[0].content)
+    assert artifact_graph == outcome.graph.model_dump(mode="json")
+    rendered = outcome.graph.model_dump_json() + backend.published[0].content.decode()
+    for component in short_components:
+        assert f'"field_path":"{component}"' not in rendered
+        assert f"{{{component}}}" not in rendered
+
+
+def test_short_live_token_component_is_rejected_from_graph_and_artifact() -> None:
+    backend = RecordingBackend()
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/api/accounts": {
+                "get": {
+                    "responses": {
+                        "200": {"description": "live-only structure"}
+                    }
+                }
+            }
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"access_token": "tk"},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=document, request=request)
+        if request.url.path == "/api/accounts":
+            return httpx.Response(
+                200,
+                json={"safe": {"status": "ok"}, "tk": {"value": 1}},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(records=()),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload(sources=["openapi"])))
+    )
+
+    output_paths = {
+        field.field_path for field in outcome.graph.operations[0].outputs
+    }
+    assert output_paths == {"safe", "safe.status"}
+    assert '"field_path":"tk"' not in outcome.graph.model_dump_json()
+    assert b'"field_path":"tk"' not in backend.published[0].content
+
+
 def test_katana_query_values_do_not_delete_authoritative_fields_but_object_id_does() -> None:
     backend = RecordingBackend()
     runtime_object_id = "shared_secret_key"
@@ -1485,7 +1665,6 @@ def test_live_output_union_keeps_names_and_rejects_dynamic_mapping_keys(
         "declared-hyphen",
         "common",
         "common.status",
-        "id",
         "account_id",
         "ssn",
         "admin_note",
@@ -1502,6 +1681,7 @@ def test_live_output_union_keeps_names_and_rejects_dynamic_mapping_keys(
         assert all(
             rejected not in field_path for field_path in output_paths
         )
+    assert "id" not in output_paths
 
     rendered = (
         outcome.graph.model_dump_json()
