@@ -1,4 +1,4 @@
-"""Synchronous Discovery job orchestration for the scanner worker."""
+"""Synchronous Discovery and Execution orchestration for the scanner worker."""
 
 from __future__ import annotations
 
@@ -17,13 +17,19 @@ from scanner.artifacts import ArtifactBuilder, Redactor
 from scanner.audit import AuditEvent, AuditSink, InMemoryAuditSink
 from scanner.auth.session_manager import RuntimeContext, SessionManager
 from scanner.contracts import (
+    ApprovalStatus,
     ContractSource,
     DiscoveryJobRequest,
+    ExecutionJobRequest,
     InputField,
     NormalizedApiGraph,
     Operation,
     OutputField,
+    PlanApprovalDecision,
     PolicyModule,
+    RelationshipAnalysis,
+    ScanPlan,
+    ScanResult,
     TargetProfile,
 )
 from scanner.crawler.katana_runner import (
@@ -36,6 +42,7 @@ from scanner.crawler.normalizer import (
     normalize_openapi,
 )
 from scanner.http_client import ResponseSnapshot, SafeHttpClient, ScannerRequestError
+from scanner.executor import Executor
 from scanner.integration.backend_client import (
     BackendClient,
     ScannerErrorReport,
@@ -75,8 +82,12 @@ _PROGRESS = {
     ScannerStage.DISCOVERING: 45,
     ScannerStage.NORMALIZING: 65,
     ScannerStage.OBJECT_DISCOVERY: 85,
+    ScannerStage.POLICY_VALIDATION: 70,
+    ScannerStage.EXECUTING: 80,
+    ScannerStage.VERIFYING: 90,
     ScannerStage.COMPLETED: 100,
 }
+_OPAQUE_ARTIFACT_REFERENCE = re.compile(r"artifact:[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class ContractLoadError(ValueError):
@@ -91,7 +102,12 @@ class DiscoveryJobError(RuntimeError):
     """A fixed Discovery job failure that contains no target runtime data."""
 
 
+class ExecutionJobError(RuntimeError):
+    """A fixed Execution job failure that contains no target runtime data."""
+
+
 ContractModel = TypeVar("ContractModel", bound=BaseModel)
+JobRequest = DiscoveryJobRequest | ExecutionJobRequest
 
 
 def load_contract_source(
@@ -126,6 +142,15 @@ class DiscoveryOutcome:
     graph_artifact_ref: str
     available_object_types: tuple[str, ...]
     requests_used: int
+
+
+@dataclass(frozen=True)
+class ExecutionOutcome:
+    job_id: str
+    scan_id: str
+    decision: PlanApprovalDecision
+    scan_result: ScanResult | None
+    result_artifact_ref: str | None
 
 
 @dataclass
@@ -163,7 +188,7 @@ class _TrackedRequestBudget(RequestBudget):
 
 
 class Scanner:
-    """Coordinates one safe Discovery job without backend or LLM implementation."""
+    """Coordinates safe scanner jobs without backend or LLM implementation."""
 
     def __init__(
         self,
@@ -363,6 +388,300 @@ class Scanner:
             requests_used=budget.requests_used,
         )
 
+    def run_execution(
+        self,
+        request: ExecutionJobRequest,
+    ) -> ExecutionOutcome:
+        cancellation = CancellationGuard(self._backend)
+        self._check_cancellation(request, cancellation)
+        self._progress(request, ScannerStage.PROFILE_LOADING, {})
+
+        profile = self._load_execution_contract(
+            request,
+            request.target_profile,
+            TargetProfile,
+            artifact_error_code="EXECUTION_PROFILE_FETCH_FAILED",
+            invalid_error_code="EXECUTION_PROFILE_INVALID",
+        )
+        graph = self._load_execution_contract(
+            request,
+            request.normalized_api_graph,
+            NormalizedApiGraph,
+            artifact_error_code="EXECUTION_GRAPH_FETCH_FAILED",
+            invalid_error_code="EXECUTION_GRAPH_INVALID",
+        )
+        analysis = self._load_execution_contract(
+            request,
+            request.relationship_analysis,
+            RelationshipAnalysis,
+            artifact_error_code="EXECUTION_ANALYSIS_FETCH_FAILED",
+            invalid_error_code="EXECUTION_ANALYSIS_INVALID",
+        )
+        plan = self._load_execution_contract(
+            request,
+            request.scan_plan,
+            ScanPlan,
+            artifact_error_code="EXECUTION_PLAN_FETCH_FAILED",
+            invalid_error_code="EXECUTION_PLAN_INVALID",
+        )
+        if {
+            request.scan_id,
+            profile.scan_id,
+            graph.scan_id,
+            analysis.scan_id,
+            plan.scan_id,
+        } != {request.scan_id}:
+            self._execution_fail(
+                request,
+                code="EXECUTION_CONTRACT_INVALID",
+                stage=ScannerStage.PROFILE_LOADING,
+                retryable=False,
+                message="execution contract is invalid",
+            )
+        self._check_cancellation(request, cancellation)
+
+        state, budget = self._execution_state_for(
+            request,
+            profile,
+            cancellation,
+        )
+        policy = PolicyEnforcer(profile)
+        client = SafeHttpClient(
+            policy=policy,
+            budget=budget,
+            transport=self._transport,
+            redactor=Redactor(),
+            audit_sink=self._audit_sink,
+        )
+        rehydrating = state.runtime is None
+        session_manager = SessionManager(client)
+        if rehydrating:
+            self._progress(request, ScannerStage.AUTHENTICATING, {"actors": 2})
+            try:
+                state.runtime = session_manager.authenticate(profile)
+            except CancellationRequested:
+                self._cancelled(request)
+                raise
+            except Exception:
+                self._check_cancellation(request, cancellation)
+                self._execution_fail(
+                    request,
+                    code="EXECUTION_AUTHENTICATION_FAILED",
+                    stage=ScannerStage.AUTHENTICATING,
+                    retryable=False,
+                    message="execution authentication failed",
+                )
+        runtime = state.runtime
+        if runtime.scan_id != request.scan_id:
+            self._execution_fail(
+                request,
+                code="EXECUTION_RUNTIME_INVALID",
+                stage=ScannerStage.AUTHENTICATING,
+                retryable=False,
+                message="execution runtime is invalid",
+            )
+        if rehydrating:
+            self._collect_objects_and_outputs(
+                request,
+                profile,
+                graph,
+                runtime,
+                policy,
+                self._discovery_module_id(profile),
+                session_manager,
+                client,
+                cancellation,
+            )
+        identifier_sensitive_values = runtime.sensitive_values()
+        if any(
+            not _runtime_external_text_is_safe(
+                value,
+                identifier_sensitive_values,
+            )
+            for value in (
+                request.scan_id,
+                profile.scan_id,
+                graph.scan_id,
+                analysis.scan_id,
+                plan.scan_id,
+                plan.plan_id,
+            )
+        ):
+            self._execution_fail(
+                request,
+                code="EXECUTION_CONTRACT_INVALID",
+                stage=ScannerStage.POLICY_VALIDATION,
+                retryable=False,
+                message="execution contract is invalid",
+            )
+
+        self._check_cancellation(request, cancellation)
+        self._progress(
+            request,
+            ScannerStage.POLICY_VALIDATION,
+            {"requests_used": budget.requests_used},
+        )
+        executor = Executor(
+            self._backend,
+            client=client,
+            artifact_builder=self._artifact_builder,
+            audit_sink=self._audit_sink,
+        )
+        decision = executor.evaluate_plan(
+            job_id=request.job_id,
+            profile=profile,
+            graph=graph,
+            analysis=analysis,
+            plan=plan,
+            runtime_requests_used=budget.requests_used,
+        )
+        self._check_cancellation(request, cancellation)
+        if decision.status is ApprovalStatus.REJECTED:
+            self._progress(
+                request,
+                ScannerStage.COMPLETED,
+                {"findings": 0, "requests_used": budget.requests_used},
+            )
+            return ExecutionOutcome(
+                job_id=request.job_id,
+                scan_id=request.scan_id,
+                decision=decision,
+                scan_result=None,
+                result_artifact_ref=None,
+            )
+
+        self._progress(
+            request,
+            ScannerStage.EXECUTING,
+            {"requests_used": budget.requests_used},
+        )
+        result = executor.execute(
+            job_id=request.job_id,
+            profile=profile,
+            graph=graph,
+            analysis=analysis,
+            plan=plan,
+            runtime=runtime,
+            decision=decision,
+        )
+        self._check_cancellation(request, cancellation)
+        self._progress(
+            request,
+            ScannerStage.VERIFYING,
+            {
+                "findings": len(result.findings),
+                "requests_used": budget.requests_used,
+            },
+        )
+        try:
+            envelope = self._artifact_builder.build(
+                scan_id=request.scan_id,
+                artifact_type="scan_result",
+                schema_version="1.2",
+                payload=result.model_dump(mode="json"),
+            )
+            result_artifact_ref = self._backend.publish_artifact(envelope)
+            if (
+                not isinstance(result_artifact_ref, str)
+                or _OPAQUE_ARTIFACT_REFERENCE.fullmatch(result_artifact_ref) is None
+                or not _runtime_external_text_is_safe(
+                    result_artifact_ref,
+                    runtime.sensitive_values(),
+                )
+            ):
+                raise ValueError("result artifact reference is invalid")
+        except Exception:
+            self._execution_fail(
+                request,
+                code="EXECUTION_RESULT_PUBLISH_FAILED",
+                stage=ScannerStage.VERIFYING,
+                retryable=True,
+                message="execution result publish failed",
+            )
+        self._check_cancellation(request, cancellation)
+        self._progress(
+            request,
+            ScannerStage.COMPLETED,
+            {
+                "findings": len(result.findings),
+                "requests_used": budget.requests_used,
+            },
+        )
+        return ExecutionOutcome(
+            job_id=request.job_id,
+            scan_id=request.scan_id,
+            decision=decision,
+            scan_result=result,
+            result_artifact_ref=result_artifact_ref,
+        )
+
+    def _load_execution_contract(
+        self,
+        request: ExecutionJobRequest,
+        source: ContractSource,
+        model_type: type[ContractModel],
+        *,
+        artifact_error_code: str,
+        invalid_error_code: str,
+    ) -> ContractModel:
+        try:
+            return load_contract_source(source, model_type, self._backend)
+        except ContractArtifactFetchError:
+            self._execution_fail(
+                request,
+                code=artifact_error_code,
+                stage=ScannerStage.PROFILE_LOADING,
+                retryable=True,
+                message="execution contract fetch failed",
+            )
+        except ContractLoadError:
+            self._execution_fail(
+                request,
+                code=invalid_error_code,
+                stage=ScannerStage.PROFILE_LOADING,
+                retryable=False,
+                message="execution contract is invalid",
+            )
+
+    def _execution_state_for(
+        self,
+        request: ExecutionJobRequest,
+        profile: TargetProfile,
+        cancellation: CancellationGuard,
+    ) -> tuple[_ScanState, RequestBudget]:
+        state = self._scan_states.get(request.scan_id)
+        if state is None:
+            state = _ScanState()
+            self._scan_states[request.scan_id] = state
+        try:
+            restored = self._backend.get_requests_used(request.job_id)
+            if (
+                isinstance(restored, bool)
+                or not isinstance(restored, int)
+                or restored < 0
+            ):
+                raise ValueError("invalid restored request count")
+            restored = max(state.requests_used, restored)
+            if restored > profile.safety_policy.max_requests:
+                raise ValueError("invalid restored request count")
+            budget = _TrackedRequestBudget(
+                max_requests=profile.safety_policy.max_requests,
+                requests_per_second=profile.safety_policy.requests_per_second,
+                cancellation_guard=cancellation,
+                job_id=request.job_id,
+                on_change=state.retain_requests_used,
+            )
+            budget.restore(restored)
+        except Exception:
+            self._execution_fail(
+                request,
+                code="EXECUTION_REQUEST_COUNT_INVALID",
+                stage=ScannerStage.PROFILE_LOADING,
+                retryable=False,
+                message="execution request count is invalid",
+            )
+        return state, budget
+
     def _load_profile(self, request: DiscoveryJobRequest) -> TargetProfile:
         try:
             profile = load_contract_source(
@@ -536,7 +855,7 @@ class Scanner:
 
     def _collect_objects_and_outputs(
         self,
-        request: DiscoveryJobRequest,
+        request: JobRequest,
         profile: TargetProfile,
         graph: NormalizedApiGraph,
         runtime: RuntimeContext,
@@ -940,7 +1259,7 @@ class Scanner:
 
     def _progress(
         self,
-        request: DiscoveryJobRequest,
+        request: JobRequest,
         stage: ScannerStage,
         statistics: Mapping[str, int],
     ) -> None:
@@ -951,7 +1270,7 @@ class Scanner:
             statistics,
         )
 
-    def _cancelled(self, request: DiscoveryJobRequest) -> None:
+    def _cancelled(self, request: JobRequest) -> None:
         self._backend.report_progress(
             request.job_id,
             ScannerStage.CANCELED,
@@ -961,7 +1280,7 @@ class Scanner:
 
     def _check_cancellation(
         self,
-        request: DiscoveryJobRequest,
+        request: JobRequest,
         cancellation: CancellationGuard,
     ) -> None:
         try:
@@ -1008,5 +1327,42 @@ class Scanner:
         )
         raise DiscoveryJobError(message) from None
 
+    def _execution_fail(
+        self,
+        request: ExecutionJobRequest,
+        *,
+        code: str,
+        stage: ScannerStage,
+        retryable: bool,
+        message: str,
+    ) -> None:
+        self._backend.report_error(
+            request.job_id,
+            ScannerErrorReport(
+                code=code,
+                stage=stage,
+                retryable=retryable,
+            ),
+        )
+        raise ExecutionJobError(message) from None
+
 
 LiteralActor = Literal["user_a", "user_b"]
+
+
+def _runtime_external_text_is_safe(
+    value: str,
+    sensitive_values: set[str],
+) -> bool:
+    runtime_strings = {item for item in sensitive_values if item}
+    if value in runtime_strings:
+        return False
+    cleaned = Redactor().redact(
+        value,
+        {
+            item
+            for item in runtime_strings
+            if len(item) >= _MIN_RUNTIME_COMPONENT_LENGTH
+        },
+    )
+    return isinstance(cleaned, str) and cleaned == value

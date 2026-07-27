@@ -108,6 +108,7 @@ _SAFE_INCONCLUSIVE_REASON_CODES = frozenset(
 _OPAQUE_EVIDENCE_REFERENCE = re.compile(
     r"artifact:[A-Za-z0-9][A-Za-z0-9._-]*"
 )
+_MIN_RUNTIME_SUBSTRING_LENGTH = 4
 
 
 def module_for_policy(policy: str) -> str | None:
@@ -635,15 +636,13 @@ class Executor:
             return None
 
         sensitive_values = runtime.sensitive_values()
-        redactor = Redactor()
         affected: dict[tuple[str, str, str], AffectedField] = {}
         for item in outcome.affected_fields:
-            field_path = redactor.redact(item.field_path, sensitive_values)
-            if not isinstance(field_path, str) or field_path != item.field_path:
+            if not _external_text_is_safe(item.field_path, sensitive_values):
                 raise ValueError("affected field path is invalid")
             cleaned = AffectedField(
                 location=item.location,
-                field_path=field_path,
+                field_path=item.field_path,
                 data_class=item.data_class,
             )
             affected[
@@ -681,7 +680,7 @@ class Executor:
             if (
                 not isinstance(evidence_ref, str)
                 or _OPAQUE_EVIDENCE_REFERENCE.fullmatch(evidence_ref) is None
-                or redactor.redact(evidence_ref, sensitive_values) != evidence_ref
+                or not _external_text_is_safe(evidence_ref, sensitive_values)
             ):
                 raise ValueError("evidence reference is invalid")
         except Exception:
@@ -772,7 +771,17 @@ def _external_text_is_safe(
     value: str,
     sensitive_values: set[str],
 ) -> bool:
-    cleaned = Redactor().redact(value, sensitive_values)
+    runtime_strings = {item for item in sensitive_values if item}
+    if value in runtime_strings:
+        return False
+    cleaned = Redactor().redact(
+        value,
+        {
+            item
+            for item in runtime_strings
+            if len(item) >= _MIN_RUNTIME_SUBSTRING_LENGTH
+        },
+    )
     return isinstance(cleaned, str) and cleaned == value
 
 

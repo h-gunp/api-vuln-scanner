@@ -25,6 +25,7 @@ from scanner.http_client import SafeHttpClient
 from scanner.integration.backend_client import FakeBackendClient
 from scanner.modules.base import ModuleOutcome, ModuleVerdict
 from scanner.modules.data_exposure import DataExposureModule
+from scanner.modules.input_validation import InputValidationModule
 from scanner.policy import CancellationGuard, PolicyEnforcer, RequestBudget
 
 
@@ -1113,3 +1114,68 @@ def test_empty_approved_plan_returns_valid_empty_scan_result_without_client() ->
     assert audit.events == []
     assert budget.requests_used == 3
     assert transport_calls == []
+
+
+def test_short_numeric_runtime_example_does_not_reject_digit_bearing_scan_identifiers() -> None:
+    documents = _documents(("INPUT-001", "DATA-001"))
+    runtime = _runtime()
+    runtime.parameter_examples.clear()
+    runtime.openapi_parameter_examples.clear()
+    runtime.observed_parameter_examples.clear()
+    SessionManager._collect_examples(
+        runtime.parameter_examples,
+        runtime.observed_parameter_examples,
+        {},
+        "list-items",
+        "query",
+        {"q": "1"},
+    )
+
+    result, backend, _, budget, transport_calls = _execute(
+        documents,
+        modules={
+            "INPUT-001": InputValidationModule(),
+            "DATA-001": DataExposureModule(),
+        },
+        runtime=runtime,
+    )
+
+    assert result.findings == []
+    assert [request.url.path for request in transport_calls] == [
+        "/api/items",
+        "/api/items",
+        "/api/profile",
+    ]
+    assert budget.requests_used == 6
+    assert backend.error_reports == []
+
+
+def test_exact_short_runtime_value_operation_identifier_is_rejected_before_transport() -> None:
+    documents = _documents(("DATA-001",))
+    documents.graph.operations[0].operation_id = "1"
+    documents.analysis.test_candidates[0].target_operation_id = "1"
+    documents.plan.steps[0].target_operation_id = "1"
+    runtime = _runtime()
+    runtime.parameter_examples.clear()
+    SessionManager._collect_examples(
+        runtime.parameter_examples,
+        runtime.observed_parameter_examples,
+        {},
+        "list-items",
+        "query",
+        {"q": "1"},
+    )
+    module = FixedOutcomeModule(_not_found("VERIFY-DATA-001"), requests=1)
+
+    result, backend, audit, budget, transport_calls = _execute(
+        documents,
+        modules={"DATA-001": module},
+        runtime=runtime,
+    )
+
+    assert result.findings == []
+    assert module.calls == []
+    assert transport_calls == []
+    assert budget.requests_used == 3
+    assert backend.error_reports[-1].code == "EXECUTION_STEP_INVALID"
+    assert audit.events[-1].operation_id is None
