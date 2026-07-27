@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Callable, Mapping
 from urllib.parse import urljoin
 
 import httpx
@@ -82,7 +82,12 @@ class SafeHttpClient:
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
         sensitive_values: set[str] | None = None,
+        login_response_consumer: Callable[[httpx.Response], None] | None = None,
     ) -> ResponseSnapshot:
+        if login_response_consumer is not None and not is_login:
+            self._emit("POLICY_DENIED")
+            raise PolicyViolation("request violates scanner safety policy")
+
         current_url = url
         current_params = params
         values = sensitive_values or set()
@@ -112,6 +117,10 @@ class SafeHttpClient:
             except httpx.HTTPError:
                 self._emit("REQUEST_FAILED")
                 raise ScannerRequestError("scanner request failed") from None
+
+            if login_response_consumer is not None:
+                login_response_consumer(response)
+                login_response_consumer = None
 
             if response.is_redirect and response.headers.get("location"):
                 current_url = urljoin(str(response.url), response.headers["location"])
