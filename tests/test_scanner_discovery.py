@@ -914,6 +914,87 @@ def test_collected_object_id_generalizes_matching_authoritative_path_segment() -
     assert runtime_account_id not in rendered
 
 
+def test_runtime_value_openapi_placeholder_is_renamed_with_matching_path_input() -> None:
+    backend = RecordingBackend()
+    session_token = "opaque-session-field"
+    document = {
+        "openapi": "3.1.0",
+        "paths": {
+            f"/api/accounts/{{id}}/sessions/{{{session_token}}}": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
+                        {
+                            "name": session_token,
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        },
+                    ],
+                    "responses": {
+                        "200": {"description": "declared template"}
+                    },
+                }
+            }
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"access_token": session_token},
+                request=request,
+            )
+        if request.url.path == "/openapi.json":
+            return httpx.Response(200, json=document, request=request)
+        return httpx.Response(200, json={}, request=request)
+
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(handler),
+        katana_runner=FakeKatanaRunner(),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(ContractSource(inline=profile_payload(sources=["openapi"])))
+    )
+
+    operation = outcome.graph.operations[0]
+    assert operation.path_template == (
+        "/api/accounts/{id}/sessions/{id_2}"
+    )
+    assert operation.operation_id == (
+        "GET:/api/accounts/{id}/sessions/{id_2}"
+    )
+    assert {
+        (field.location, field.field_path) for field in operation.inputs
+    } == {("path", "id"), ("path", "id_2")}
+    artifact_graph = json.loads(backend.published[0].content)
+    assert artifact_graph["operations"][0]["path_template"] == (
+        "/api/accounts/{id}/sessions/{id_2}"
+    )
+    assert artifact_graph["operations"][0]["operation_id"] == (
+        "GET:/api/accounts/{id}/sessions/{id_2}"
+    )
+    assert {
+        (field["location"], field["field_path"])
+        for field in artifact_graph["operations"][0]["inputs"]
+    } == {("path", "id"), ("path", "id_2")}
+    rendered = (
+        outcome.graph.model_dump_json()
+        + backend.published[0].content.decode()
+        + repr(backend.__dict__)
+        + repr(scanner)
+    )
+    assert session_token not in rendered
+
+
 def test_authoritative_fields_matching_session_token_are_dropped() -> None:
     backend = RecordingBackend()
     session_token = "opaque-session-field"

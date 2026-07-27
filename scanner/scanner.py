@@ -713,9 +713,15 @@ class Scanner:
         segments: list[str] = []
         next_index = 1
         for segment in path_template.split("/"):
+            parameter_match = _PATH_PARAMETER.fullmatch(segment)
+            component = (
+                parameter_match.group(1)
+                if parameter_match is not None
+                else segment
+            )
             if (
                 not cls._is_value_path_segment(segment)
-                and segment not in runtime_components
+                and component not in runtime_components
             ):
                 segments.append(segment)
                 continue
