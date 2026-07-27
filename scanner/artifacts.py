@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from pydantic import ValidationError
+
+from scanner.contracts import NormalizedApiGraph, ScanResult
+
 
 REDACTED = "[REDACTED]"
 SENSITIVE_KEYS = frozenset(
@@ -136,7 +140,11 @@ class ArtifactBuilder:
         sensitive_values: Iterable[Any] = (),
     ) -> ArtifactEnvelope:
         cleaned = self._redactor.redact(payload, sensitive_values)
-        if artifact_type not in STRUCTURAL_ARTIFACT_TYPES:
+        if artifact_type in STRUCTURAL_ARTIFACT_TYPES:
+            cleaned = self._canonicalize_structural_payload(
+                artifact_type, schema_version, cleaned
+            )
+        else:
             cleaned = self._remove_untyped_runtime_values(cleaned)
         content = json.dumps(
             cleaned,
@@ -153,12 +161,34 @@ class ArtifactBuilder:
             size=len(content),
         )
 
+    def _canonicalize_structural_payload(
+        self,
+        artifact_type: str,
+        schema_version: str | None,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        model_type = {
+            ("normalized_api_graph", "1.1"): NormalizedApiGraph,
+            ("scan_result", "1.2"): ScanResult,
+        }.get((artifact_type, schema_version))
+        if model_type is None:
+            raise ValueError("unsupported structural artifact schema")
+        try:
+            return model_type.model_validate(payload).model_dump(mode="json")
+        except ValidationError:
+            raise ValueError("invalid structural artifact payload") from None
+
     def _remove_untyped_runtime_values(
         self, value: Any, allow_numeric: bool = False
     ) -> Any:
         if isinstance(value, Mapping):
             return {
-                str(key): self._remove_untyped_runtime_values(
+                (
+                    str(key)
+                    if str(key).casefold() in SAFE_NUMERIC_ARTIFACT_KEYS
+                    or str(key) == REDACTED
+                    else REDACTED
+                ): self._remove_untyped_runtime_values(
                     item, str(key).casefold() in SAFE_NUMERIC_ARTIFACT_KEYS
                 )
                 for key, item in value.items()

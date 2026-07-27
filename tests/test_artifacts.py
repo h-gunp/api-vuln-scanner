@@ -1,6 +1,8 @@
 import hashlib
 import json
 
+import pytest
+
 from scanner.artifacts import ArtifactBuilder, Redactor
 from scanner.audit import AuditEvent, InMemoryAuditSink
 
@@ -73,7 +75,7 @@ def test_artifact_builder_hashes_redacted_canonical_bytes():
     assert envelope.sha256 == hashlib.sha256(envelope.content).hexdigest()
     assert envelope.size == len(envelope.content)
     assert b"token-a" not in envelope.content
-    assert envelope.content == b'{"status":200,"token":"[REDACTED]"}'
+    assert envelope.content == b'{"[REDACTED]":"[REDACTED]","status":200}'
 
 
 def test_artifact_builder_never_serializes_raw_exception_details():
@@ -96,7 +98,7 @@ def test_artifact_builder_never_serializes_raw_response_text_by_default():
     )
 
     assert b"private-account-42" not in envelope.content
-    assert envelope.content == b'{"response":"[REDACTED]","status":200}'
+    assert envelope.content == b'{"[REDACTED]":"[REDACTED]","status":200}'
 
 
 def test_artifact_builder_never_serializes_arbitrary_evidence_text_by_default():
@@ -108,7 +110,19 @@ def test_artifact_builder_never_serializes_arbitrary_evidence_text_by_default():
     )
 
     assert b"private-account-42" not in envelope.content
-    assert envelope.content == b'{"note":"[REDACTED]","status":200}'
+    assert envelope.content == b'{"[REDACTED]":"[REDACTED]","status":200}'
+
+
+def test_artifact_builder_never_serializes_arbitrary_evidence_mapping_keys():
+    envelope = ArtifactBuilder(Redactor()).build(
+        scan_id="scan-001",
+        artifact_type="evidence",
+        schema_version=None,
+        payload={"private-account-42": "safe", "status": 200},
+    )
+
+    assert b"private-account-42" not in envelope.content
+    assert envelope.content == b'{"[REDACTED]":"[REDACTED]","status":200}'
 
 
 def test_artifact_builder_preserves_normalized_graph_structural_text():
@@ -173,6 +187,35 @@ def test_artifact_builder_preserves_scan_result_structural_text():
 
     assert b"BOLA-001" in envelope.content
     assert b"account_id" in envelope.content
+
+
+@pytest.mark.parametrize(
+    ("artifact_type", "schema_version", "payload"),
+    [
+        (
+            "normalized_api_graph",
+            "1.1",
+            {"schema_version": "1.1", "scan_id": "scan-001", "operations": [], "raw": "secret-a"},
+        ),
+        (
+            "scan_result",
+            "1.2",
+            {"schema_version": "1.2", "scan_id": "scan-001", "findings": [], "raw": "secret-a"},
+        ),
+    ],
+)
+def test_artifact_builder_rejects_extra_fields_in_structural_artifacts(
+    artifact_type, schema_version, payload
+):
+    with pytest.raises(ValueError, match="invalid structural artifact payload") as error:
+        ArtifactBuilder(Redactor()).build(
+            scan_id="scan-001",
+            artifact_type=artifact_type,
+            schema_version=schema_version,
+            payload=payload,
+        )
+
+    assert "secret-a" not in str(error.value)
 
 
 def test_in_memory_audit_sink_stores_redacted_event_details():
