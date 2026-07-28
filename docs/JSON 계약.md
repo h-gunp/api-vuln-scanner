@@ -1,4 +1,4 @@
-# 최종 JSON 데이터 계약
+# JSON 계약
 
 | JSON 계약 | 생산 → 소비 | 담당 | 핵심 내용 |
 | --- | --- | --- | --- |
@@ -204,12 +204,6 @@
     }
   ]
 }
-```
-
-요청 예산은 다음 조건을 만족해야 한다.
-
-```
-requests_used + estimated_execution_requests <= max_requests
 ```
 
 ## `scan_result.json`
