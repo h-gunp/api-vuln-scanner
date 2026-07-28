@@ -57,7 +57,7 @@ def target_profile() -> TargetProfile:
 
 def account_operation(*, method: str = "GET") -> Operation:
     return Operation(
-        operation_id="get-account",
+        operation_id=f"{method.upper()}:/api/accounts/{{account_id}}",
         method=method,
         path_template="/api/accounts/{account_id}",
         inputs=[InputField(location="path", field_path="account_id", type="string")],
@@ -70,7 +70,7 @@ def account_step(*, owner: str = "user_b", method: str = "GET") -> ScanStep:
         order=1,
         candidate_id="candidate-bola",
         module_id="BOLA-001",
-        target_operation_id="get-account",
+        target_operation_id=f"{method.upper()}:/api/accounts/{{account_id}}",
         target_endpoint=TargetEndpoint(
             method=method,
             path_template="/api/accounts/{account_id}",
@@ -99,13 +99,13 @@ def discovered_runtime() -> RuntimeContext:
     collector.collect_response(
         runtime,
         actor_id="user_a",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"account_id": "acct-a-1"},
     )
     collector.collect_response(
         runtime,
         actor_id="user_b",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"account_id": "acct-b-1"},
     )
     return runtime
@@ -332,7 +332,7 @@ def test_bola_does_not_follow_redirects_and_uses_exactly_two_transports():
 def test_bola_array_body_path_is_inconclusive_before_network():
     requests: list[httpx.Request] = []
     operation = Operation(
-        operation_id="get-account-array",
+        operation_id="GET:/api/accounts",
         method="GET",
         path_template="/api/accounts",
         inputs=[
@@ -484,7 +484,7 @@ def test_bola_replaces_case_insensitive_bound_authorization_with_exact_user_a_he
     SessionManager(cast(SafeHttpClient, None)).collect_response(
         runtime,
         actor_id="user_a",
-        operation_id="get-account",
+        operation_id="GET:/api/accounts/{account_id}",
         body={},
         observed_header={"authorization": "Bearer attacker-token"},
     )
@@ -529,7 +529,7 @@ def test_bola_shared_only_actor_object_is_inconclusive_before_network():
         collector.collect_response(
             runtime,
             actor_id=cast(str, actor_id),
-            operation_id="list-accounts",
+            operation_id="GET:/api/accounts",
             body={"account_id": "00-shared"},
         )
 
@@ -552,13 +552,13 @@ def test_bola_shared_and_distinct_objects_selects_stable_user_b_only_value():
     collector.collect_response(
         runtime,
         actor_id="user_a",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"items": [{"account_id": "00-shared"}, {"account_id": "zz-a-only"}]},
     )
     collector.collect_response(
         runtime,
         actor_id="user_b",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"items": [{"account_id": "00-shared"}, {"account_id": "zz-b-only"}]},
     )
 
@@ -590,13 +590,13 @@ def test_bola_encoded_object_path_is_inconclusive_before_any_request():
     collector.collect_response(
         runtime,
         actor_id="user_a",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"account_id": "acct-a-1"},
     )
     collector.collect_response(
         runtime,
         actor_id="user_b",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"account_id": "acct b/1"},
     )
 

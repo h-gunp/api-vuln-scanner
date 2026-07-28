@@ -66,7 +66,7 @@ def operation(
     path_template: str = "/api/profile",
 ) -> Operation:
     return Operation(
-        operation_id="get-profile",
+        operation_id=f"{method.upper()}:{path_template}",
         method=method,
         path_template=path_template,
         inputs=[],
@@ -83,7 +83,7 @@ def step(
         order=1,
         candidate_id="candidate-data",
         module_id="DATA-001",
-        target_operation_id="get-profile",
+        target_operation_id=f"{method.upper()}:{path_template}",
         target_endpoint=TargetEndpoint(
             method=method,
             path_template=path_template,
@@ -370,7 +370,7 @@ def test_data_exposure_redirect_following_is_disabled_for_exact_count():
                 sessions={
                     "user_a": ActorSession(actor_id="user_a", token="token-a")
                 },
-                required_inputs={"get-profile": {("path", "profile_id")}},
+                required_inputs={"GET:/api/profile/{profile_id}": {("path", "profile_id")}},
             ),
             operation(path_template="/api/profile/{profile_id}"),
             step(path_template="/api/profile/{profile_id}"),

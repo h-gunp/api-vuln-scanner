@@ -151,7 +151,7 @@ def _documents(
     )
     operations = {
         "BOLA-001": {
-            "operation_id": "get-account",
+            "operation_id": "GET:/api/accounts/{account_id}",
             "method": "GET",
             "path_template": "/api/accounts/{account_id}",
             "inputs": [
@@ -164,7 +164,7 @@ def _documents(
             "outputs": [],
         },
         "INPUT-001": {
-            "operation_id": "list-items",
+            "operation_id": "GET:/api/items",
             "method": "GET",
             "path_template": "/api/items",
             "inputs": [
@@ -173,30 +173,9 @@ def _documents(
             "outputs": [],
         },
         "DATA-001": {
-            "operation_id": "get-profile",
+            "operation_id": "GET:/api/profile",
             "method": "GET",
             "path_template": "/api/profile",
-            "inputs": [],
-            "outputs": [],
-        },
-        "AUTHN-001": {
-            "operation_id": "authn-operation",
-            "method": "GET",
-            "path_template": "/api/authn",
-            "inputs": [],
-            "outputs": [],
-        },
-        "TRANSACTION-001": {
-            "operation_id": "transaction-operation",
-            "method": "GET",
-            "path_template": "/api/transactions",
-            "inputs": [],
-            "outputs": [],
-        },
-        "UNKNOWN-001": {
-            "operation_id": "unknown-operation",
-            "method": "GET",
-            "path_template": "/api/unknown",
             "inputs": [],
             "outputs": [],
         },
@@ -322,7 +301,7 @@ def _runtime() -> RuntimeContext:
         runtime.parameter_examples,
         runtime.observed_parameter_examples,
         {},
-        "list-items",
+        "GET:/api/items",
         "query",
         {"q": "runtime-query-value"},
     )
@@ -566,8 +545,18 @@ def test_capacity_exhaustion_before_step_stops_remaining_modules_without_request
 def test_forged_approved_decision_never_routes_forbidden_modules(
     forbidden_module_id: str,
 ) -> None:
-    documents = _documents((forbidden_module_id,))
-    documents.plan.steps[0].target_operation_id = "runtime-token-a"
+    documents = _documents(("DATA-001",))
+    documents.analysis.test_candidates[0] = (
+        documents.analysis.test_candidates[0].model_copy(
+            update={"module_id": forbidden_module_id}
+        )
+    )
+    documents.plan.steps[0] = documents.plan.steps[0].model_copy(
+        update={
+            "module_id": forbidden_module_id,
+            "target_operation_id": "runtime-token-a",
+        }
+    )
     forbidden = FixedOutcomeModule(_verified(), requests=1)
 
     result, backend, audit, budget, transport_calls = _execute(
@@ -620,7 +609,7 @@ def test_verified_outcome_publishes_redacted_evidence_and_verified_only_finding(
 
     assert len(result.findings) == 1
     finding = result.findings[0]
-    assert finding.operation_id == "get-profile"
+    assert finding.operation_id == "GET:/api/profile"
     assert finding.vulnerability_type == VulnerabilityType.DATA_EXPOSURE
     assert finding.verification.rule_id == "VERIFY-DATA-001"
     assert finding.verification.verified_conditions == [
@@ -636,7 +625,6 @@ def test_verified_outcome_publishes_redacted_evidence_and_verified_only_finding(
 
 
 def test_finding_id_is_stable_for_sorted_conditions_and_affected_field_paths() -> None:
-    documents = _documents(("DATA-001", "DATA-001"))
     first = _verified(
         affected_fields=(
             AffectedField(
@@ -654,18 +642,20 @@ def test_finding_id_is_stable_for_sorted_conditions_and_affected_field_paths() -
     second = _verified(
         affected_fields=tuple(reversed(first.affected_fields)),
     )
-    module = SequenceModule((first, second))
-
-    result, _, _, _, _ = _execute(
-        documents,
-        modules={"DATA-001": module},
+    first_result, _, _, _, _ = _execute(
+        _documents(("DATA-001",)),
+        modules={"DATA-001": FixedOutcomeModule(first)},
+    )
+    second_result, _, _, _, _ = _execute(
+        _documents(("DATA-001",)),
+        modules={"DATA-001": FixedOutcomeModule(second)},
     )
 
-    assert len(module.calls) == 2
-    assert len(result.findings) == 1
-    assert result.findings[0].finding_id == (
-        "finding-c5386b92523d8d71ac6d3b70"
-    )
+    assert len(first_result.findings) == 1
+    assert len(second_result.findings) == 1
+    assert [first_result.findings[0].finding_id, second_result.findings[0].finding_id] == [
+        "finding-7b39ec1e8f0f77e4af1c186d"
+    ] * 2
 
 
 def test_not_found_and_inconclusive_outcomes_emit_no_findings_and_audit_events() -> None:
@@ -1126,7 +1116,7 @@ def test_short_numeric_runtime_example_does_not_reject_digit_bearing_scan_identi
         runtime.parameter_examples,
         runtime.observed_parameter_examples,
         {},
-        "list-items",
+        "GET:/api/items",
         "query",
         {"q": "1"},
     )
@@ -1161,7 +1151,7 @@ def test_exact_short_runtime_value_operation_identifier_is_rejected_before_trans
         runtime.parameter_examples,
         runtime.observed_parameter_examples,
         {},
-        "list-items",
+        "GET:/api/items",
         "query",
         {"q": "1"},
     )

@@ -135,7 +135,7 @@ def test_artifact_builder_preserves_normalized_graph_structural_text():
             "scan_id": "scan-001",
             "operations": [
                 {
-                    "operation_id": "get-account",
+                    "operation_id": "GET:/api/accounts/{account_id}",
                     "method": "GET",
                     "path_template": "/api/accounts/{account_id}",
                     "inputs": [
@@ -151,7 +151,7 @@ def test_artifact_builder_preserves_normalized_graph_structural_text():
         },
     )
 
-    assert b"get-account" in envelope.content
+    assert b"GET:/api/accounts/{account_id}" in envelope.content
     assert b"/api/accounts/{account_id}" in envelope.content
 
 
@@ -166,7 +166,7 @@ def test_artifact_builder_preserves_scan_result_structural_text():
             "findings": [
                 {
                     "finding_id": "finding-001",
-                    "operation_id": "get-account",
+                    "operation_id": "GET:/api/accounts/{account_id}",
                     "vulnerability_type": "BOLA",
                     "verification": {
                         "rule_id": "BOLA-001",

@@ -110,7 +110,7 @@ def data_documents(requests_used: int) -> tuple[dict[str, object], dict[str, obj
         "scan_id": SCAN_ID,
         "operations": [
             {
-                "operation_id": "get-profile",
+                "operation_id": "GET:/api/profile",
                 "method": "GET",
                 "path_template": "/api/profile",
                 "inputs": [],
@@ -122,7 +122,7 @@ def data_documents(requests_used: int) -> tuple[dict[str, object], dict[str, obj
         {
             "candidate_id": f"data-{index}",
             "module_id": "DATA-001",
-            "target_operation_id": "get-profile",
+            "target_operation_id": "GET:/api/profile",
             "required_object_types": [],
             "rationale": "fixed local fixture",
             "priority": index,
@@ -141,7 +141,7 @@ def data_documents(requests_used: int) -> tuple[dict[str, object], dict[str, obj
             "order": index,
             "candidate_id": f"data-{index}",
             "module_id": "DATA-001",
-            "target_operation_id": "get-profile",
+            "target_operation_id": "GET:/api/profile",
             "target_endpoint": {
                 "method": "GET",
                 "path_template": "/api/profile",
@@ -371,7 +371,7 @@ def test_missing_runtime_rehydrates_actor_objects_from_loaded_graph_before_appro
         "scan_id": SCAN_ID,
         "operations": [
             {
-                "operation_id": "get-accounts",
+                "operation_id": "GET:/api/accounts",
                 "method": "GET",
                 "path_template": "/api/accounts",
                 "inputs": [],

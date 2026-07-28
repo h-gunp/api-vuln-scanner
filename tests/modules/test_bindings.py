@@ -16,7 +16,7 @@ def account_detail_operation(
     path_template: str = "/api/accounts/{account_id}",
 ) -> Operation:
     return Operation(
-        operation_id="get-account",
+        operation_id=f"GET:{path_template}",
         method="GET",
         path_template=path_template,
         inputs=inputs
@@ -32,13 +32,13 @@ def runtime_context() -> RuntimeContext:
     collector.collect_response(
         runtime,
         actor_id="user_a",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"items": [{"account_id": "acct-a-2"}, {"account_id": "acct-a-1"}]},
     )
     collector.collect_response(
         runtime,
         actor_id="user_b",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"items": [{"account_id": "acct-b-2"}, {"account_id": "acct-b-1"}]},
     )
     return runtime
@@ -79,7 +79,7 @@ def test_path_binding_url_encodes_runtime_value():
     collector.collect_response(
         runtime,
         actor_id="user_b",
-        operation_id="list-accounts",
+        operation_id="GET:/api/accounts",
         body={"account_id": "acct b/0"},
     )
 
@@ -101,8 +101,8 @@ def test_parameter_bindings_use_only_declared_stable_runtime_examples():
         ],
     )
     runtime = runtime_context()
-    runtime.parameter_examples[("get-account", "query", "page")] = {"2", "1"}
-    runtime.parameter_examples[("get-account", "header", "X-Trace")] = {"z", "a"}
+    runtime.parameter_examples[("GET:/api/accounts", "query", "page")] = {"2", "1"}
+    runtime.parameter_examples[("GET:/api/accounts", "header", "X-Trace")] = {"z", "a"}
 
     bound = bind_operation(
         operation=operation,

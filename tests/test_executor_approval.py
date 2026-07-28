@@ -134,7 +134,7 @@ def _valid_documents() -> ApprovalDocuments:
         scan_id="scan-001",
         operations=[
             Operation(
-                operation_id="get-account",
+                operation_id="GET:/api/accounts/{account_id}",
                 method="GET",
                 path_template="/api/accounts/{account_id}",
                 inputs=[
@@ -147,7 +147,7 @@ def _valid_documents() -> ApprovalDocuments:
                 outputs=[],
             ),
             Operation(
-                operation_id="list-items",
+                operation_id="GET:/api/items",
                 method="GET",
                 path_template="/api/items",
                 inputs=[
@@ -156,7 +156,7 @@ def _valid_documents() -> ApprovalDocuments:
                 outputs=[],
             ),
             Operation(
-                operation_id="get-profile",
+                operation_id="GET:/api/profile",
                 method="GET",
                 path_template="/api/profile",
                 inputs=[],
@@ -176,7 +176,7 @@ def _valid_documents() -> ApprovalDocuments:
             CandidateContract(
                 candidate_id="candidate-bola",
                 module_id="BOLA-001",
-                target_operation_id="get-account",
+                target_operation_id="GET:/api/accounts/{account_id}",
                 required_object_types=["account"],
                 rationale="fixed test fixture",
                 priority=1,
@@ -194,7 +194,7 @@ def _valid_documents() -> ApprovalDocuments:
             CandidateContract(
                 candidate_id="candidate-input",
                 module_id="INPUT-001",
-                target_operation_id="list-items",
+                target_operation_id="GET:/api/items",
                 required_object_types=[],
                 rationale="fixed test fixture",
                 priority=2,
@@ -211,7 +211,7 @@ def _valid_documents() -> ApprovalDocuments:
             CandidateContract(
                 candidate_id="candidate-data",
                 module_id="DATA-001",
-                target_operation_id="get-profile",
+                target_operation_id="GET:/api/profile",
                 required_object_types=[],
                 rationale="fixed test fixture",
                 priority=3,
@@ -240,7 +240,7 @@ def _valid_documents() -> ApprovalDocuments:
                 order=1,
                 candidate_id="candidate-bola",
                 module_id="BOLA-001",
-                target_operation_id="get-account",
+                target_operation_id="GET:/api/accounts/{account_id}",
                 target_endpoint=TargetEndpoint(
                     method="GET",
                     path_template="/api/accounts/{account_id}",
@@ -259,7 +259,7 @@ def _valid_documents() -> ApprovalDocuments:
                 order=2,
                 candidate_id="candidate-input",
                 module_id="INPUT-001",
-                target_operation_id="list-items",
+                target_operation_id="GET:/api/items",
                 target_endpoint=TargetEndpoint(
                     method="GET",
                     path_template="/api/items",
@@ -276,7 +276,7 @@ def _valid_documents() -> ApprovalDocuments:
                 order=3,
                 candidate_id="candidate-data",
                 module_id="DATA-001",
-                target_operation_id="get-profile",
+                target_operation_id="GET:/api/profile",
                 target_endpoint=TargetEndpoint(
                     method="GET",
                     path_template="/api/profile",
@@ -370,8 +370,8 @@ def test_rejects_plan_scan_id_mismatch() -> None:
 
 def test_rejects_unknown_operation() -> None:
     def mutate(documents: ApprovalDocuments) -> None:
-        documents.plan.steps[0].target_operation_id = "missing-operation"
-        documents.analysis.test_candidates[0].target_operation_id = "missing-operation"
+        documents.plan.steps[0].target_operation_id = "GET:/api/missing"
+        documents.analysis.test_candidates[0].target_operation_id = "GET:/api/missing"
 
     _assert_single_rejection(mutate, "PLAN_OPERATION_UNKNOWN")
 

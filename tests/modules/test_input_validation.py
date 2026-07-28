@@ -92,7 +92,7 @@ def operation(
         f"/api/items/{{{field_path}}}" if location == "path" else "/api/items"
     )
     return Operation(
-        operation_id="list-items",
+        operation_id=f"{method.upper()}:{path_template}",
         method=method,
         path_template=path_template,
         inputs=[
@@ -119,7 +119,7 @@ def step(
         order=1,
         candidate_id="candidate-input",
         module_id="INPUT-001",
-        target_operation_id="list-items",
+        target_operation_id=f"{method.upper()}:{path_template}",
         target_endpoint=TargetEndpoint(method=method, path_template=path_template),
         input_bindings=[
             InputBinding(
@@ -138,24 +138,28 @@ def runtime_with_example(
     field_path: str = "page",
     source: str = "observed",
 ) -> RuntimeContext:
-    key = ("list-items", location, field_path)
+    path_template = (
+        f"/api/items/{{{field_path}}}" if location == "path" else "/api/items"
+    )
+    operation_id = f"GET:{path_template}"
+    key = (operation_id, location, field_path)
     runtime = RuntimeContext(
         scan_id="scan-001",
         sessions={"user_a": ActorSession(actor_id="user_a", token="token-a")},
-        required_inputs={"list-items": {(location, field_path)}},
+        required_inputs={operation_id: {(location, field_path)}},
     )
     collector = SessionManager(cast(SafeHttpClient, None))
     collector.collect_response(
         runtime,
         actor_id="user_a",
-        operation_id="list-items",
+        operation_id=operation_id,
         body={"account_id": "acct-a-1"},
         **{f"observed_{location}": {field_path: value}},
     )
     collector.collect_response(
         runtime,
         actor_id="user_b",
-        operation_id="list-items",
+        operation_id=operation_id,
         body={"account_id": "acct-b-1"},
     )
     if source == "openapi":
@@ -207,14 +211,14 @@ def test_input_uses_observed_query_baseline_and_one_numeric_invalid_variant():
 
 
 def test_input_prefers_openapi_example_over_sorted_observed_query_values():
-    key = ("list-items", "query", "page")
+    key = ("GET:/api/items", "query", "page")
     runtime = runtime_with_example("7", source="openapi")
     collector = SessionManager(cast(SafeHttpClient, None))
     for value in ("1", "3"):
         collector.collect_response(
             runtime,
             actor_id="user_a",
-            operation_id="list-items",
+            operation_id="GET:/api/items",
             body={},
             observed_query={"page": value},
         )
@@ -252,7 +256,7 @@ def test_input_string_mutation_is_stable_and_invalid_format():
     outcome = InputValidationModule().run(context)
 
     assert outcome.verdict is ModuleVerdict.NOT_FOUND
-    assert requests == ["2026-07-28", "invalid-083ddbb62379d19f"]
+    assert requests == ["2026-07-28", "invalid-38a4666b6fc2543f"]
 
 
 @pytest.mark.parametrize(
@@ -400,7 +404,7 @@ def test_input_verifies_invalid_success_that_introduces_sensitive_field():
                 sessions={
                     "user_a": ActorSession(actor_id="user_a", token="token-a")
                 },
-                required_inputs={"list-items": {("query", "page")}},
+                required_inputs={"GET:/api/items": {("query", "page")}},
             ),
             step(),
             "INPUT_BASELINE_UNAVAILABLE",
@@ -411,7 +415,7 @@ def test_input_verifies_invalid_success_that_introduces_sensitive_field():
                 order=1,
                 candidate_id="candidate-input",
                 module_id="INPUT-001",
-                target_operation_id="list-items",
+                target_operation_id="GET:/api/items",
                 target_endpoint=TargetEndpoint(
                     method="GET",
                     path_template="/api/items",
