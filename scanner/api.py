@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import threading
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from fastapi import BackgroundTasks, FastAPI, status
 
@@ -21,6 +24,7 @@ from scanner.scanner import DiscoveryJobError, ExecutionJobError, Scanner
 
 
 _UNEXPECTED_ERROR_CODE = "SCANNER_UNEXPECTED_ERROR"
+_DEFAULT_MAX_WORKERS = 4
 
 
 class JobRegistry:
@@ -56,11 +60,9 @@ class _BackgroundRunner:
         self,
         scanner: Scanner,
         backend: BackendClient,
-        registry: JobRegistry,
     ) -> None:
         self._scanner = scanner
         self._backend = backend
-        self._registry = registry
 
     def run_discovery(self, request: DiscoveryJobRequest) -> None:
         self._run(
@@ -83,15 +85,14 @@ class _BackgroundRunner:
         job_kind: JobKind,
         operation: Callable[[], object],
     ) -> None:
-        with self._registry.scan_lock(request.scan_id):
-            try:
-                operation()
-            except (DiscoveryJobError, ExecutionJobError):
-                return
-            except CancellationRequested:
-                return
-            except Exception:
-                self._report_unexpected_failure(request, job_kind)
+        try:
+            operation()
+        except (DiscoveryJobError, ExecutionJobError):
+            return
+        except CancellationRequested:
+            return
+        except Exception:
+            self._report_unexpected_failure(request, job_kind)
 
     def _report_unexpected_failure(
         self,
@@ -113,11 +114,72 @@ class _BackgroundRunner:
             return
 
 
+class _KeyedJobScheduler:
+    """Bounded worker pool that submits at most one active job per scan."""
+
+    def __init__(self, max_workers: int) -> None:
+        if (
+            isinstance(max_workers, bool)
+            or not isinstance(max_workers, int)
+            or max_workers <= 0
+        ):
+            raise ValueError("max_workers must be a positive integer")
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="scanner-job",
+        )
+        self._queues: dict[str, deque[Callable[[], None]]] = {}
+        self._active_scans: set[str] = set()
+
+    def submit(self, scan_id: str, operation: Callable[[], None]) -> None:
+        with self._lock:
+            queue = self._queues.setdefault(scan_id, deque())
+            queue.append(operation)
+            if scan_id in self._active_scans:
+                return
+            self._active_scans.add(scan_id)
+            next_operation = queue.popleft()
+        self._dispatch(scan_id, next_operation)
+
+    def _dispatch(
+        self,
+        scan_id: str,
+        operation: Callable[[], None],
+    ) -> None:
+        try:
+            self._executor.submit(self._run, scan_id, operation)
+        except RuntimeError:
+            with self._lock:
+                self._queues[scan_id].appendleft(operation)
+                self._active_scans.discard(scan_id)
+
+    def _run(
+        self,
+        scan_id: str,
+        operation: Callable[[], None],
+    ) -> None:
+        try:
+            operation()
+        finally:
+            self._advance(scan_id)
+
+    def _advance(self, scan_id: str) -> None:
+        with self._lock:
+            queue = self._queues[scan_id]
+            if not queue:
+                self._active_scans.remove(scan_id)
+                return
+            next_operation = queue.popleft()
+        self._dispatch(scan_id, next_operation)
+
+
 def create_app(
     *,
     scanner: Scanner | None = None,
     backend: BackendClient | None = None,
     registry: JobRegistry | None = None,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
 ) -> FastAPI:
     """Create one injected or environment-backed scanner worker app."""
 
@@ -126,10 +188,10 @@ def create_app(
         resolved_backend = HttpBackendClient(BackendSettings.from_env())
     resolved_scanner = scanner if scanner is not None else Scanner(resolved_backend)
     resolved_registry = registry if registry is not None else JobRegistry()
+    scheduler = _KeyedJobScheduler(max_workers)
     runner = _BackgroundRunner(
         resolved_scanner,
         resolved_backend,
-        resolved_registry,
     )
 
     worker_app = FastAPI()
@@ -143,7 +205,11 @@ def create_app(
         background_tasks: BackgroundTasks,
     ) -> dict[str, object]:
         if resolved_registry.register(request.job_id):
-            background_tasks.add_task(runner.run_discovery, request)
+            background_tasks.add_task(
+                scheduler.submit,
+                request.scan_id,
+                partial(runner.run_discovery, request),
+            )
         return {"job_id": request.job_id, "accepted": True}
 
     @worker_app.post(
@@ -155,7 +221,11 @@ def create_app(
         background_tasks: BackgroundTasks,
     ) -> dict[str, object]:
         if resolved_registry.register(request.job_id):
-            background_tasks.add_task(runner.run_execution, request)
+            background_tasks.add_task(
+                scheduler.submit,
+                request.scan_id,
+                partial(runner.run_execution, request),
+            )
         return {"job_id": request.job_id, "accepted": True}
 
     return worker_app

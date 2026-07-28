@@ -743,16 +743,19 @@ class Executor:
         operation_id: str | None = None,
         module_id: str | None = None,
     ) -> None:
-        self._backend.report_error(
-            job_id,
-            ScannerErrorReport(
-                code=code,
-                stage=stage,
-                retryable=retryable,
-            ),
-            scan_id=backend_scan_id or scan_id,
-            job_kind=JobKind.EXECUTION,
-        )
+        try:
+            self._backend.report_error(
+                job_id,
+                ScannerErrorReport(
+                    code=code,
+                    stage=stage,
+                    retryable=retryable,
+                ),
+                scan_id=backend_scan_id or scan_id,
+                job_kind=JobKind.EXECUTION,
+            )
+        except Exception:
+            pass
         self._emit(
             code=code,
             level="WARNING",

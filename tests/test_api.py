@@ -27,7 +27,7 @@ from scanner.integration.backend_client import (
     ScannerStage,
 )
 from scanner.policy import CancellationRequested
-from scanner.scanner import DiscoveryJobError, ExecutionJobError
+from scanner.scanner import DiscoveryJobError, ExecutionJobError, Scanner
 
 
 DISCOVERY_PAYLOAD = {
@@ -60,20 +60,55 @@ class RecordingScanner:
         self._discovery = discovery
         self._execution = execution
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
         self.discovery_requests: list[DiscoveryJobRequest] = []
         self.execution_requests: list[ExecutionJobRequest] = []
+        self.discovery_completed = 0
+        self.execution_completed = 0
 
     def run_discovery(self, request: DiscoveryJobRequest) -> None:
-        with self._lock:
+        with self._condition:
             self.discovery_requests.append(request)
-        if self._discovery is not None:
-            self._discovery(request)
+            self._condition.notify_all()
+        try:
+            if self._discovery is not None:
+                self._discovery(request)
+        finally:
+            with self._condition:
+                self.discovery_completed += 1
+                self._condition.notify_all()
 
     def run_execution(self, request: ExecutionJobRequest) -> None:
-        with self._lock:
+        with self._condition:
             self.execution_requests.append(request)
-        if self._execution is not None:
-            self._execution(request)
+            self._condition.notify_all()
+        try:
+            if self._execution is not None:
+                self._execution(request)
+        finally:
+            with self._condition:
+                self.execution_completed += 1
+                self._condition.notify_all()
+
+    def wait_for(
+        self,
+        *,
+        discovery_calls: int = 0,
+        execution_calls: int = 0,
+        discovery_completed: int = 0,
+        execution_completed: int = 0,
+        timeout: float = 2,
+    ) -> bool:
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: (
+                    len(self.discovery_requests) >= discovery_calls
+                    and len(self.execution_requests) >= execution_calls
+                    and self.discovery_completed >= discovery_completed
+                    and self.execution_completed >= execution_completed
+                ),
+                timeout=timeout,
+            )
 
 
 def _app(
@@ -81,11 +116,13 @@ def _app(
     *,
     backend: object | None = None,
     registry: JobRegistry | None = None,
+    max_workers: int = 4,
 ) -> FastAPI:
     return create_app(
         scanner=scanner,  # type: ignore[arg-type]
         backend=backend or FakeBackendClient(),  # type: ignore[arg-type]
         registry=registry,
+        max_workers=max_workers,
     )
 
 
@@ -113,6 +150,7 @@ def test_discovery_endpoint_accepts_exact_contract_and_preserves_job_id() -> Non
         "job_id": "backend-generated_JOB.01",
         "accepted": True,
     }
+    assert scanner.wait_for(discovery_completed=1)
     assert [
         request.model_dump(exclude_none=True)
         for request in scanner.discovery_requests
@@ -134,6 +172,7 @@ def test_execution_endpoint_accepts_exact_contract_and_preserves_job_id() -> Non
         "job_id": "backend-generated_JOB.02",
         "accepted": True,
     }
+    assert scanner.wait_for(execution_completed=1)
     assert [
         request.model_dump(exclude_none=True)
         for request in scanner.execution_requests
@@ -172,6 +211,7 @@ def test_invalid_contract_source_returns_422_without_registering_or_running(
         "job_id": "backend-generated_JOB.01",
         "accepted": True,
     }
+    assert scanner.wait_for(discovery_completed=1)
     assert len(scanner.discovery_requests) == 1
 
 
@@ -195,6 +235,7 @@ def test_scanner_runs_in_background_thread_without_an_event_loop() -> None:
     )
 
     assert status_code == 202
+    assert scanner.wait_for(discovery_completed=1)
     assert observations == [False]
 
 
@@ -209,6 +250,7 @@ def test_duplicate_job_id_is_accepted_without_a_second_execution() -> None:
         202,
         {"job_id": "backend-generated_JOB.01", "accepted": True},
     )
+    assert scanner.wait_for(discovery_completed=1)
     assert len(scanner.discovery_requests) == 1
 
 
@@ -224,6 +266,7 @@ def test_job_id_registry_is_shared_across_job_kinds() -> None:
     execution = _post_once(app, "/jobs/execution", execution_payload)
 
     assert discovery[0] == execution[0] == 202
+    assert scanner.wait_for(discovery_completed=1)
     assert len(scanner.discovery_requests) == 1
     assert scanner.execution_requests == []
 
@@ -275,6 +318,7 @@ def test_different_job_ids_each_execute() -> None:
     second = _post_once(app, "/jobs/discovery", second_payload)
 
     assert first[0] == second[0] == 202
+    assert scanner.wait_for(discovery_completed=2)
     assert [request.job_id for request in scanner.discovery_requests] == [
         "backend-generated_JOB.01",
         "backend-job-other",
@@ -289,15 +333,19 @@ class ConcurrencyScanner(RecordingScanner):
         self.active = 0
         self.max_active = 0
         self.entered = 0
+        self.first_entered = threading.Event()
         self.second_entered = threading.Event()
         self.release = threading.Event()
         self.rendezvous_passes = 0
+        self.rendezvous_complete = threading.Event()
 
     def _run(self) -> None:
         with self._active_lock:
             self.active += 1
             self.entered += 1
             self.max_active = max(self.max_active, self.active)
+            if self.entered == 1:
+                self.first_entered.set()
             if self.entered == 2:
                 self.second_entered.set()
         try:
@@ -310,6 +358,8 @@ class ConcurrencyScanner(RecordingScanner):
                     return
                 with self._active_lock:
                     self.rendezvous_passes += 1
+                    if self.rendezvous_passes == 2:
+                        self.rendezvous_complete.set()
         finally:
             with self._active_lock:
                 self.active -= 1
@@ -343,10 +393,12 @@ def test_same_scan_discovery_and_execution_do_not_overlap() -> None:
             "/jobs/execution",
             EXECUTION_PAYLOAD,
         )
+        assert scanner.first_entered.wait(timeout=1)
         assert not scanner.second_entered.wait(timeout=0.5)
         scanner.release.set()
         discovery_result = discovery.result(timeout=2)
         execution_result = execution.result(timeout=2)
+        assert scanner.second_entered.wait(timeout=1)
 
     assert discovery_result[0] == execution_result[0] == 202
     assert scanner.entered == 2
@@ -380,10 +432,69 @@ def test_different_scan_ids_execute_concurrently() -> None:
         )
         discovery_result = discovery.result(timeout=2)
         execution_result = execution.result(timeout=2)
+        assert scanner.second_entered.wait(timeout=1)
+        assert scanner.rendezvous_complete.wait(timeout=1)
 
     assert discovery_result[0] == execution_result[0] == 202
     assert scanner.rendezvous_passes == 2
     assert scanner.max_active == 2
+
+
+def test_same_scan_queue_cannot_saturate_workers_and_starve_another_scan() -> None:
+    hot_started = threading.Event()
+    other_scan_started = threading.Event()
+    release_hot_scan = threading.Event()
+    all_hot_jobs_finished = threading.Event()
+    hot_job_count = 9
+    finished_hot_jobs = 0
+    count_lock = threading.Lock()
+
+    def run(request: DiscoveryJobRequest) -> None:
+        nonlocal finished_hot_jobs
+        if request.scan_id == "scan-hot":
+            hot_started.set()
+            try:
+                assert release_hot_scan.wait(timeout=3)
+            finally:
+                with count_lock:
+                    finished_hot_jobs += 1
+                    if finished_hot_jobs == hot_job_count:
+                        all_hot_jobs_finished.set()
+        else:
+            other_scan_started.set()
+
+    scanner = RecordingScanner(discovery=run)
+    app = _app(scanner, max_workers=2)
+    hot_payloads = [
+        {
+            **DISCOVERY_PAYLOAD,
+            "job_id": f"hot-job-{index}",
+            "scan_id": "scan-hot",
+        }
+        for index in range(hot_job_count)
+    ]
+    other_payload = {
+        **DISCOVERY_PAYLOAD,
+        "job_id": "other-scan-job",
+        "scan_id": "scan-other",
+    }
+
+    try:
+        first = _post_once(app, "/jobs/discovery", hot_payloads[0])
+        assert first[0] == 202
+        assert hot_started.wait(timeout=1)
+        for payload in hot_payloads[1:]:
+            assert _post_once(app, "/jobs/discovery", payload)[0] == 202
+
+        other = _post_once(app, "/jobs/discovery", other_payload)
+
+        assert other[0] == 202
+        assert other_scan_started.wait(timeout=1)
+    finally:
+        release_hot_scan.set()
+
+    assert all_hot_jobs_finished.wait(timeout=2)
+    assert len(scanner.discovery_requests) == hot_job_count + 1
 
 
 @pytest.mark.parametrize(
@@ -436,8 +547,58 @@ def test_known_scanner_failure_is_not_reported_twice(
     )
 
     assert status_code == 202
+    assert scanner.wait_for(
+        discovery_completed=1 if job_kind is JobKind.DISCOVERY else 0,
+        execution_completed=1 if job_kind is JobKind.EXECUTION else 0,
+    )
     assert len(backend.error_events) == 1
     assert backend.error_events[0].report.code == "ALREADY_REPORTED"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/jobs/discovery", DISCOVERY_PAYLOAD),
+        ("/jobs/execution", EXECUTION_PAYLOAD),
+    ],
+)
+def test_known_scanner_failure_callback_error_is_attempted_only_once(
+    path: str,
+    payload: dict[str, object],
+) -> None:
+    class CallbackResponseLostBackend(FakeBackendClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts: list[ScannerErrorReport] = []
+            self.first_attempt = threading.Event()
+            self.second_attempt = threading.Event()
+
+        def report_error(
+            self,
+            job_id: str,
+            report: ScannerErrorReport,
+            *,
+            scan_id: str | None = None,
+            job_kind: JobKind | None = None,
+        ) -> None:
+            self.attempts.append(report)
+            if len(self.attempts) == 1:
+                self.first_attempt.set()
+            else:
+                self.second_attempt.set()
+            raise RuntimeError("callback response was lost")
+
+    backend = CallbackResponseLostBackend()
+    scanner = Scanner(backend)
+    app = create_app(scanner=scanner, backend=backend, max_workers=1)
+
+    status_code, _ = _post_once(app, path, payload)
+
+    assert status_code == 202
+    assert backend.first_attempt.wait(timeout=1)
+    assert not backend.second_attempt.wait(timeout=0.5)
+    assert len(backend.attempts) == 1
+    assert backend.attempts[0].code != "SCANNER_UNEXPECTED_ERROR"
 
 
 def test_cancellation_does_not_emit_a_failed_callback() -> None:
@@ -455,11 +616,33 @@ def test_cancellation_does_not_emit_a_failed_callback() -> None:
     )
 
     assert status_code == 202
+    assert scanner.wait_for(discovery_completed=1)
     assert backend.error_events == []
 
 
 def test_unexpected_failure_emits_one_fixed_secret_free_callback_and_stays_seen() -> None:
-    backend = FakeBackendClient()
+    class NotifyingBackend(FakeBackendClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reported = threading.Event()
+
+        def report_error(
+            self,
+            job_id: str,
+            report: ScannerErrorReport,
+            *,
+            scan_id: str | None = None,
+            job_kind: JobKind | None = None,
+        ) -> None:
+            super().report_error(
+                job_id,
+                report,
+                scan_id=scan_id,
+                job_kind=job_kind,
+            )
+            self.reported.set()
+
+    backend = NotifyingBackend()
 
     def fail(_: ExecutionJobRequest) -> None:
         raise RuntimeError("unexpected secret=raw-runtime-token")
@@ -470,6 +653,8 @@ def test_unexpected_failure_emits_one_fixed_secret_free_callback_and_stays_seen(
     first = _post_once(app, "/jobs/execution", EXECUTION_PAYLOAD)
     retry = _post_once(app, "/jobs/execution", EXECUTION_PAYLOAD)
 
+    assert scanner.wait_for(execution_completed=1)
+    assert backend.reported.wait(timeout=1)
     assert first == retry == (
         202,
         {"job_id": "backend-generated_JOB.02", "accepted": True},
@@ -492,9 +677,11 @@ def test_unexpected_failure_reporting_error_is_swallowed_and_job_stays_seen() ->
     class FailingBackend:
         def __init__(self) -> None:
             self.attempts = 0
+            self.attempted = threading.Event()
 
         def report_error(self, *_: object, **__: object) -> None:
             self.attempts += 1
+            self.attempted.set()
             raise RuntimeError("callback unavailable")
 
     backend = FailingBackend()
@@ -508,6 +695,7 @@ def test_unexpected_failure_reporting_error_is_swallowed_and_job_stays_seen() ->
     first = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
     retry = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
 
+    assert backend.attempted.wait(timeout=1)
     assert first[0] == retry[0] == 202
     assert len(scanner.discovery_requests) == 1
     assert backend.attempts == 1

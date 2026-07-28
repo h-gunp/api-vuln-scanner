@@ -95,6 +95,23 @@ class FailingArtifactBackend(FakeBackendClient):
         raise RuntimeError("raw-backend-secret")
 
 
+class FailingErrorBackend(FakeBackendClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.error_attempts = 0
+
+    def report_error(
+        self,
+        job_id,
+        report,
+        *,
+        scan_id: str | None = None,
+        job_kind: JobKind | None = None,
+    ) -> None:
+        self.error_attempts += 1
+        raise RuntimeError("callback response was lost")
+
+
 class SecretReferenceBackend(FakeBackendClient):
     def publish_artifact(
         self,
@@ -1244,6 +1261,30 @@ def test_malformed_verified_module_outcome_becomes_secret_free_module_failure() 
     assert result.findings == []
     assert backend.error_reports[-1].code == "EXECUTION_MODULE_FAILED"
     assert "raw-module-secret" not in repr((backend.error_reports, audit.events))
+
+
+def test_known_executor_failure_callback_error_is_not_retried_or_propagated() -> None:
+    documents = _documents(("DATA-001",))
+    malformed = ModuleOutcome(
+        verdict=ModuleVerdict.VERIFIED,
+        rule_id="VERIFY-DATA-001",
+        conditions=("DATA_SENSITIVE_FIELD_UNMASKED",),
+        affected_fields=("raw-module-secret",),  # type: ignore[arg-type]
+        evidence={},
+    )
+    backend = FailingErrorBackend()
+    audit = InMemoryAuditSink()
+
+    result, _, _, _, _ = _execute(
+        documents,
+        backend=backend,
+        modules={"DATA-001": FixedOutcomeModule(malformed)},
+        audit=audit,
+    )
+
+    assert result.findings == []
+    assert backend.error_attempts == 1
+    assert audit.events[-1].code == "EXECUTION_MODULE_FAILED"
 
 
 def test_string_verdict_never_falls_through_to_verified_finding() -> None:

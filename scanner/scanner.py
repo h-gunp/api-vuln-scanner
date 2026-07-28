@@ -1402,16 +1402,19 @@ class Scanner:
         retryable: bool,
         message: str,
     ) -> None:
-        self._backend.report_error(
-            request.job_id,
-            ScannerErrorReport(
-                code=code,
-                stage=stage,
-                retryable=retryable,
-            ),
-            scan_id=request.scan_id,
-            job_kind=JobKind.DISCOVERY,
-        )
+        try:
+            self._backend.report_error(
+                request.job_id,
+                ScannerErrorReport(
+                    code=code,
+                    stage=stage,
+                    retryable=retryable,
+                ),
+                scan_id=request.scan_id,
+                job_kind=JobKind.DISCOVERY,
+            )
+        except Exception:
+            pass
         raise DiscoveryJobError(message) from None
 
     def _execution_fail(
@@ -1423,16 +1426,19 @@ class Scanner:
         retryable: bool,
         message: str,
     ) -> None:
-        self._backend.report_error(
-            request.job_id,
-            ScannerErrorReport(
-                code=code,
-                stage=stage,
-                retryable=retryable,
-            ),
-            scan_id=request.scan_id,
-            job_kind=JobKind.EXECUTION,
-        )
+        try:
+            self._backend.report_error(
+                request.job_id,
+                ScannerErrorReport(
+                    code=code,
+                    stage=stage,
+                    retryable=retryable,
+                ),
+                scan_id=request.scan_id,
+                job_kind=JobKind.EXECUTION,
+            )
+        except Exception:
+            pass
         raise ExecutionJobError(message) from None
 
 
