@@ -7,6 +7,12 @@ from scanner.artifacts import ArtifactBuilder, Redactor
 from scanner.audit import AuditEvent, InMemoryAuditSink
 
 
+def _reject_duplicate_json_keys(pairs):
+    keys = [key for key, _ in pairs]
+    assert len(keys) == len(set(keys))
+    return dict(pairs)
+
+
 def test_redactor_removes_secret_keys_runtime_values_and_url_query_secrets():
     raw = {
         "headers": {"Authorization": "Bearer token-a", "Cookie": "sid=cookie-a"},
@@ -66,7 +72,7 @@ def test_redactor_removes_sensitive_numeric_and_string_mapping_keys():
 def test_artifact_builder_hashes_redacted_canonical_bytes():
     envelope = ArtifactBuilder(Redactor()).build(
         scan_id="scan-001",
-        artifact_type="evidence",
+        artifact_type="diagnostic",
         schema_version=None,
         payload={"token": "token-a", "status": 200},
         sensitive_values={"token-a"},
@@ -78,10 +84,143 @@ def test_artifact_builder_hashes_redacted_canonical_bytes():
     assert envelope.content == b'{"[REDACTED]":"[REDACTED]","status":200}'
 
 
-def test_artifact_builder_never_serializes_raw_exception_details():
+def test_artifact_builder_preserves_typed_evidence_without_runtime_values():
+    payload = {
+        "scan_id": "scan-001",
+        "operation_id": "GET:/api/profile",
+        "module_id": "DATA-001",
+        "rule_id": "VERIFY-DATA-001",
+        "verified_conditions": ["DATA_SENSITIVE_FIELD_UNMASKED"],
+        "affected_fields": [
+            {
+                "location": "response",
+                "field_path": "profile.password",
+                "data_class": "authentication",
+            }
+        ],
+        "baseline": {
+            "actor_id": "user_a",
+            "status_code": 200,
+            "response_structure_sha256": "a" * 64,
+            "observed_field_paths": ["profile.password"],
+        },
+        "variant": {
+            "actor_id": "user_a",
+            "status_code": 200,
+            "response_structure_sha256": "a" * 64,
+            "observed_field_paths": ["profile.password"],
+        },
+    }
+
     envelope = ArtifactBuilder(Redactor()).build(
         scan_id="scan-001",
         artifact_type="evidence",
+        schema_version=None,
+        payload=payload,
+        sensitive_values={"runtime-token-a", "private-account-42"},
+    )
+
+    decoded = json.loads(
+        envelope.content,
+        object_pairs_hook=_reject_duplicate_json_keys,
+    )
+    assert decoded == payload
+    assert b"runtime-token-a" not in envelope.content
+    assert b"private-account-42" not in envelope.content
+    assert b"[REDACTED]" not in envelope.content
+
+
+def test_artifact_builder_rejects_sensitive_values_inside_evidence_metadata():
+    payload = {
+        "scan_id": "scan-001",
+        "operation_id": "GET:/api/runtime-token-a",
+        "module_id": "DATA-001",
+        "rule_id": "VERIFY-DATA-001",
+        "verified_conditions": ["DATA_SENSITIVE_FIELD_UNMASKED"],
+        "affected_fields": [
+            {
+                "location": "response",
+                "field_path": "profile.password",
+                "data_class": "authentication",
+            }
+        ],
+        "baseline": {
+            "actor_id": "user_a",
+            "status_code": 200,
+            "response_structure_sha256": "a" * 64,
+            "observed_field_paths": [],
+        },
+        "variant": {
+            "actor_id": "user_a",
+            "status_code": 200,
+            "response_structure_sha256": "a" * 64,
+            "observed_field_paths": [],
+        },
+    }
+
+    with pytest.raises(ValueError, match="invalid evidence artifact payload"):
+        ArtifactBuilder(Redactor()).build(
+            scan_id="scan-001",
+            artifact_type="evidence",
+            schema_version=None,
+            payload=payload,
+            sensitive_values={"runtime-token-a"},
+        )
+
+
+def test_artifact_builder_only_exact_matches_short_evidence_secrets():
+    payload = {
+        "scan_id": "scan-001",
+        "operation_id": "GET:/api/profile",
+        "module_id": "DATA-001",
+        "rule_id": "VERIFY-DATA-001",
+        "verified_conditions": ["DATA_SENSITIVE_FIELD_UNMASKED"],
+        "affected_fields": [
+            {
+                "location": "response",
+                "field_path": "profile.password",
+                "data_class": "authentication",
+            }
+        ],
+        "baseline": {
+            "actor_id": "user_a",
+            "status_code": 200,
+            "response_structure_sha256": "1" * 64,
+            "observed_field_paths": ["profile.password"],
+        },
+        "variant": {
+            "actor_id": "user_a",
+            "status_code": 200,
+            "response_structure_sha256": "1" * 64,
+            "observed_field_paths": ["profile.password"],
+        },
+    }
+
+    envelope = ArtifactBuilder(Redactor()).build(
+        scan_id="scan-001",
+        artifact_type="evidence",
+        schema_version=None,
+        payload=payload,
+        sensitive_values={"1"},
+    )
+
+    assert json.loads(envelope.content) == payload
+
+    exact_match = {**payload, "scan_id": "pw"}
+    with pytest.raises(ValueError, match="invalid evidence artifact payload"):
+        ArtifactBuilder(Redactor()).build(
+            scan_id="pw",
+            artifact_type="evidence",
+            schema_version=None,
+            payload=exact_match,
+            sensitive_values={"pw"},
+        )
+
+
+def test_artifact_builder_never_serializes_raw_exception_details():
+    envelope = ArtifactBuilder(Redactor()).build(
+        scan_id="scan-001",
+        artifact_type="diagnostic",
         schema_version=None,
         payload={"error": ValueError("database response: private-account-42")},
     )
@@ -92,7 +231,7 @@ def test_artifact_builder_never_serializes_raw_exception_details():
 def test_artifact_builder_never_serializes_raw_response_text_by_default():
     envelope = ArtifactBuilder(Redactor()).build(
         scan_id="scan-001",
-        artifact_type="evidence",
+        artifact_type="diagnostic",
         schema_version=None,
         payload={"response": "private-account-42", "status": 200},
     )
@@ -104,7 +243,7 @@ def test_artifact_builder_never_serializes_raw_response_text_by_default():
 def test_artifact_builder_never_serializes_arbitrary_evidence_text_by_default():
     envelope = ArtifactBuilder(Redactor()).build(
         scan_id="scan-001",
-        artifact_type="evidence",
+        artifact_type="diagnostic",
         schema_version=None,
         payload={"note": "private-account-42", "status": 200},
     )
@@ -116,7 +255,7 @@ def test_artifact_builder_never_serializes_arbitrary_evidence_text_by_default():
 def test_artifact_builder_never_serializes_arbitrary_evidence_mapping_keys():
     envelope = ArtifactBuilder(Redactor()).build(
         scan_id="scan-001",
-        artifact_type="evidence",
+        artifact_type="diagnostic",
         schema_version=None,
         payload={"private-account-42": "safe", "status": 200},
     )

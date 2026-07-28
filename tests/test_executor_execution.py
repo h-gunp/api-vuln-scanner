@@ -349,7 +349,23 @@ def _verified(
                 data_class="authentication",
             ),
         ),
-        evidence=evidence or {"response": "untyped-response-value", "status": 200},
+        evidence=evidence
+        or {
+            "request": {
+                "operation_id": "GET:/api/profile",
+                "method": "GET",
+            },
+            "response": {
+                "status_code": 200,
+                "json_body": {
+                    "profile": {
+                        "password": "untyped-response-value",
+                        "enabled": True,
+                    }
+                },
+                "url": "https://scanner.test/api/profile",
+            },
+        },
     )
 
 
@@ -595,9 +611,24 @@ def test_verified_outcome_publishes_redacted_evidence_and_verified_only_finding(
     module = FixedOutcomeModule(
         _verified(
             evidence={
-                "authorization": "runtime-token-a",
-                "response": "raw-response-secret",
-                "status": 200,
+                "request": {
+                    "operation_id": "GET:/api/profile",
+                    "method": "GET",
+                    "authorization": "runtime-token-a",
+                },
+                "response": {
+                    "status_code": 200,
+                    "json_body": {
+                        "profile": {
+                            "password": "raw-response-secret",
+                            "account_id": "private-account-42",
+                        }
+                    },
+                    "url": (
+                        "https://scanner.test/api/profile"
+                        "?account_id=private-account-42"
+                    ),
+                },
             }
         )
     )
@@ -622,6 +653,143 @@ def test_verified_outcome_publishes_redacted_evidence_and_verified_only_finding(
     evidence = backend.fetch_artifact("artifact:1")
     assert b"runtime-token-a" not in evidence
     assert b"raw-response-secret" not in evidence
+    assert b"private-account-42" not in evidence
+    decoded = json.loads(evidence)
+    assert decoded["scan_id"] == "scan-001"
+    assert decoded["operation_id"] == "GET:/api/profile"
+    assert decoded["module_id"] == "DATA-001"
+    assert decoded["rule_id"] == "VERIFY-DATA-001"
+    assert decoded["verified_conditions"] == ["DATA_SENSITIVE_FIELD_UNMASKED"]
+    assert decoded["affected_fields"] == [
+        {
+            "location": "response",
+            "field_path": "profile.password",
+            "data_class": "authentication",
+        }
+    ]
+    assert decoded["baseline"]["actor_id"] == "user_a"
+    assert decoded["variant"]["actor_id"] == "user_a"
+    assert decoded["baseline"]["status_code"] == 200
+    assert decoded["variant"]["status_code"] == 200
+    assert decoded["baseline"]["response_structure_sha256"] == decoded["variant"][
+        "response_structure_sha256"
+    ]
+    assert decoded["baseline"]["observed_field_paths"] == [
+        "profile.account_id",
+        "profile.password",
+    ]
+    assert decoded["variant"] == decoded["baseline"]
+
+
+def test_response_structure_hash_depends_on_field_names_and_types_not_values() -> None:
+    def artifact_for(body: object) -> dict[str, object]:
+        outcome = _verified(
+            evidence={
+                "request": {
+                    "operation_id": "GET:/api/profile",
+                    "method": "GET",
+                },
+                "response": {
+                    "status_code": 200,
+                    "json_body": body,
+                    "url": "https://scanner.test/api/profile",
+                },
+            }
+        )
+        _, backend, _, _, _ = _execute(
+            _documents(("DATA-001",)),
+            modules={"DATA-001": FixedOutcomeModule(outcome)},
+        )
+        return json.loads(backend.fetch_artifact("artifact:1"))
+
+    first = artifact_for(
+        {"items": [{"account_id": "private-account-42", "active": True}]}
+    )
+    same_structure = artifact_for(
+        {"items": [{"account_id": "different-account-99", "active": False}]}
+    )
+    different_type = artifact_for(
+        {"items": [{"account_id": 42, "active": False}]}
+    )
+
+    first_hash = first["baseline"]["response_structure_sha256"]  # type: ignore[index]
+    same_hash = same_structure["baseline"]["response_structure_sha256"]  # type: ignore[index]
+    different_hash = different_type["baseline"]["response_structure_sha256"]  # type: ignore[index]
+    assert first_hash == same_hash
+    assert first_hash != different_hash
+    assert first["baseline"]["observed_field_paths"] == [  # type: ignore[index]
+        "items[].account_id",
+        "items[].active",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("module_id", "rule_id", "condition", "evidence"),
+    [
+        (
+            "BOLA-001",
+            "VERIFY-BOLA-001",
+            "BOLA_FOREIGN_OBJECT_RETURNED",
+            {
+                "baseline": {
+                    "status_code": 200,
+                    "json_body": {"account_id": "private-account-42"},
+                    "url": "https://scanner.test/api/accounts/private-account-42",
+                },
+                "variant": {
+                    "status_code": 200,
+                    "json_body": {"account_id": "foreign-account-99"},
+                    "url": "https://scanner.test/api/accounts/foreign-account-99",
+                },
+            },
+        ),
+        (
+            "INPUT-001",
+            "VERIFY-INPUT-001",
+            "INPUT_INVALID_VALUE_EXPANDED_SCOPE",
+            {
+                "baseline": {
+                    "status_code": 200,
+                    "json_body": {"items": [{"name": "first"}]},
+                    "url": "https://scanner.test/api/items?q=1",
+                },
+                "variant": {
+                    "status_code": 200,
+                    "json_body": {"items": [{"name": "second"}]},
+                    "url": "https://scanner.test/api/items?q=-1",
+                },
+            },
+        ),
+    ],
+)
+def test_comparison_evidence_records_authenticated_user_a_for_both_observations(
+    module_id: str,
+    rule_id: str,
+    condition: str,
+    evidence: dict[str, object],
+) -> None:
+    affected_path = "account_id" if module_id == "BOLA-001" else "items"
+    outcome = _verified(
+        rule_id=rule_id,
+        condition=condition,
+        affected_fields=(
+            AffectedField(
+                location="response",
+                field_path=affected_path,
+                data_class="account" if module_id == "BOLA-001" else "other",
+            ),
+        ),
+        evidence=evidence,
+    )
+
+    _, backend, _, _, _ = _execute(
+        _documents((module_id,)),
+        modules={module_id: FixedOutcomeModule(outcome)},
+    )
+
+    decoded = json.loads(backend.fetch_artifact("artifact:1"))
+    assert decoded["baseline"]["actor_id"] == "user_a"
+    assert decoded["variant"]["actor_id"] == "user_a"
 
 
 def test_finding_id_is_stable_for_sorted_conditions_and_affected_field_paths() -> None:

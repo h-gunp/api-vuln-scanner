@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
-from scanner.contracts import NormalizedApiGraph, ScanResult
+from scanner.contracts import EvidenceArtifact, NormalizedApiGraph, ScanResult
 
 
 REDACTED = "[REDACTED]"
@@ -42,6 +42,7 @@ SAFE_NUMERIC_ARTIFACT_KEYS = frozenset(
         "status_code",
     }
 )
+MIN_SENSITIVE_SUBSTRING_LENGTH = 4
 
 
 @dataclass(frozen=True)
@@ -139,12 +140,40 @@ class ArtifactBuilder:
         payload: Mapping[str, Any],
         sensitive_values: Iterable[Any] = (),
     ) -> ArtifactEnvelope:
-        cleaned = self._redactor.redact(payload, sensitive_values)
+        if artifact_type == "evidence":
+            canonical = self._canonicalize_evidence_payload(schema_version, payload)
+            protected_values = _fixed_evidence_semantic_values(canonical)
+            evidence_values = tuple(sensitive_values)
+            short_sensitive_values = {
+                value
+                for value in evidence_values
+                if isinstance(value, str)
+                and value
+                and len(value) < MIN_SENSITIVE_SUBSTRING_LENGTH
+                and value not in protected_values
+            }
+            if _contains_exact_string_value(canonical, short_sensitive_values):
+                raise ValueError("invalid evidence artifact payload")
+            evidence_sensitive_values = tuple(
+                value
+                for value in evidence_values
+                if not isinstance(value, str)
+                or (
+                    len(value) >= MIN_SENSITIVE_SUBSTRING_LENGTH
+                    and value not in protected_values
+                )
+            )
+            cleaned = self._redactor.redact(canonical, evidence_sensitive_values)
+            if cleaned != canonical:
+                raise ValueError("invalid evidence artifact payload")
+            cleaned = self._canonicalize_evidence_payload(schema_version, cleaned)
+        else:
+            cleaned = self._redactor.redact(payload, sensitive_values)
         if artifact_type in STRUCTURAL_ARTIFACT_TYPES:
             cleaned = self._canonicalize_structural_payload(
                 artifact_type, schema_version, cleaned
             )
-        else:
+        elif artifact_type != "evidence":
             cleaned = self._remove_untyped_runtime_values(cleaned)
         content = json.dumps(
             cleaned,
@@ -160,6 +189,18 @@ class ArtifactBuilder:
             sha256=hashlib.sha256(content).hexdigest(),
             size=len(content),
         )
+
+    def _canonicalize_evidence_payload(
+        self,
+        schema_version: str | None,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if schema_version is not None:
+            raise ValueError("unsupported evidence artifact schema")
+        try:
+            return EvidenceArtifact.model_validate(payload).model_dump(mode="json")
+        except ValidationError:
+            raise ValueError("invalid evidence artifact payload") from None
 
     def _canonicalize_structural_payload(
         self,
@@ -202,3 +243,45 @@ class ArtifactBuilder:
         if isinstance(value, (int, float, bool)) and not allow_numeric:
             return REDACTED
         return value
+
+
+def _fixed_evidence_semantic_values(payload: Mapping[str, Any]) -> set[str]:
+    protected = {
+        str(payload.get("module_id", "")),
+        str(payload.get("rule_id", "")),
+    }
+    protected.update(
+        item
+        for item in payload.get("verified_conditions", ())
+        if isinstance(item, str)
+    )
+    for observation_name in ("baseline", "variant"):
+        observation = payload.get(observation_name)
+        if isinstance(observation, Mapping):
+            actor_id = observation.get("actor_id")
+            if isinstance(actor_id, str):
+                protected.add(actor_id)
+    affected_fields = payload.get("affected_fields")
+    if isinstance(affected_fields, list):
+        for item in affected_fields:
+            if not isinstance(item, Mapping):
+                continue
+            for key in ("location", "data_class"):
+                value = item.get(key)
+                if isinstance(value, str):
+                    protected.add(value)
+    protected.discard("")
+    return protected
+
+
+def _contains_exact_string_value(value: Any, sensitive_values: set[str]) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            _contains_exact_string_value(item, sensitive_values)
+            for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(
+            _contains_exact_string_value(item, sensitive_values) for item in value
+        )
+    return isinstance(value, str) and value in sensitive_values
