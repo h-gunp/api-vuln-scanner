@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -15,10 +14,18 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from scanner.artifacts import ArtifactEnvelope
-from scanner.contracts import PlanApprovalDecision
+from scanner.contracts import PlanApprovalDecision, is_opaque_identifier
 
 
-_OPAQUE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_SAFE_PROGRESS_METRICS = frozenset(
+    {
+        "actors",
+        "findings",
+        "object_types",
+        "operations",
+        "requests_used",
+    }
+)
 _CONFIGURATION_ERROR = "backend client configuration is invalid"
 _CONTEXT_REQUIRED_ERROR = "backend callback context is required"
 _CONTEXT_INVALID_ERROR = "backend callback context is invalid"
@@ -171,10 +178,8 @@ def _required_context(
         raise BackendIntegrationError(_CONTEXT_REQUIRED_ERROR)
     normalized_kind = _optional_job_kind(job_kind)
     if (
-        not isinstance(job_id, str)
-        or not job_id
-        or not isinstance(scan_id, str)
-        or _OPAQUE_COMPONENT.fullmatch(scan_id) is None
+        not is_opaque_identifier(job_id)
+        or not is_opaque_identifier(scan_id)
         or normalized_kind is None
     ):
         raise BackendIntegrationError(_CONTEXT_INVALID_ERROR)
@@ -186,7 +191,7 @@ def _progress_payload(
     job_kind: JobKind,
     stage: ScannerStage,
     progress: int,
-    statistics: Mapping[str, int],
+    statistics: Mapping[str, int | float],
 ) -> dict[str, object]:
     if (
         isinstance(progress, bool)
@@ -195,11 +200,25 @@ def _progress_payload(
         or not isinstance(statistics, Mapping)
     ):
         raise BackendIntegrationError(_PAYLOAD_INVALID_ERROR)
+    metrics: dict[str, int | float] = {}
+    for name, value in statistics.items():
+        try:
+            valid_number = (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and value >= 0
+                and math.isfinite(value)
+            )
+        except (TypeError, ValueError, OverflowError):
+            valid_number = False
+        if name not in _SAFE_PROGRESS_METRICS or not valid_number:
+            raise BackendIntegrationError(_PAYLOAD_INVALID_ERROR)
+        metrics[name] = value
     return {
         "stage": _map_stage(job_kind, stage),
         "progress": min(progress, 99),
         "message": None,
-        "metrics": dict(statistics),
+        "metrics": metrics,
     }
 
 
@@ -243,7 +262,7 @@ class ProgressEvent:
     job_id: str
     stage: ScannerStage
     progress: int
-    statistics: Mapping[str, int]
+    statistics: Mapping[str, int | float]
     scan_id: str | None = None
     job_kind: JobKind | None = None
     backend_stage: str | None = None
@@ -302,7 +321,7 @@ class BackendClient(Protocol):
         job_id: str,
         stage: ScannerStage,
         progress: int,
-        statistics: Mapping[str, int],
+        statistics: Mapping[str, int | float],
         *,
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
@@ -394,7 +413,7 @@ class FakeBackendClient:
         job_id: str,
         stage: ScannerStage,
         progress: int,
-        statistics: Mapping[str, int],
+        statistics: Mapping[str, int | float],
         *,
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
@@ -582,7 +601,7 @@ class HttpBackendClient:
         job_id: str,
         stage: ScannerStage,
         progress: int,
-        statistics: Mapping[str, int],
+        statistics: Mapping[str, int | float],
         *,
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
@@ -764,7 +783,7 @@ class HttpBackendClient:
             raise BackendIntegrationError(_ARTIFACT_RESPONSE_ERROR) from None
         if (
             not isinstance(artifact_id, str)
-            or _OPAQUE_COMPONENT.fullmatch(artifact_id) is None
+            or not is_opaque_identifier(artifact_id)
         ):
             raise BackendIntegrationError(_ARTIFACT_RESPONSE_ERROR)
         return f"artifact:{artifact_id}"

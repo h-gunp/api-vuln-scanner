@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +20,7 @@ warnings.filterwarnings(
 
 from starlette.testclient import TestClient
 
+import scanner.api as scanner_api
 from scanner.api import JobRegistry, create_app
 from scanner.contracts import DiscoveryJobRequest, ExecutionJobRequest
 from scanner.integration.backend_client import (
@@ -215,6 +218,122 @@ def test_invalid_contract_source_returns_422_without_registering_or_running(
     assert len(scanner.discovery_requests) == 1
 
 
+@pytest.mark.parametrize(
+    ("path", "base_payload", "field", "invalid_value"),
+    [
+        ("/jobs/discovery", DISCOVERY_PAYLOAD, "job_id", "bad/job"),
+        ("/jobs/discovery", DISCOVERY_PAYLOAD, "scan_id", "bad?scan"),
+        ("/jobs/execution", EXECUTION_PAYLOAD, "job_id", "bad job"),
+        ("/jobs/execution", EXECUTION_PAYLOAD, "scan_id", "../scan"),
+    ],
+)
+def test_invalid_job_routing_id_returns_422_without_registering_or_running(
+    path: str,
+    base_payload: dict[str, object],
+    field: str,
+    invalid_value: str,
+) -> None:
+    scanner = RecordingScanner()
+    registry = JobRegistry()
+    payload = {**base_payload, field: invalid_value}
+
+    status_code, _ = _post_once(
+        _app(scanner, registry=registry),
+        path,
+        payload,
+    )
+
+    assert status_code == 422
+    assert registry.register(str(payload["job_id"])) is True
+    assert scanner.discovery_requests == []
+    assert scanner.execution_requests == []
+
+
+def test_importing_scanner_package_does_not_construct_api_app() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import scanner, sys; "
+                "print('scanner.api' in sys.modules)"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "False"
+
+
+def test_app_lifespan_closes_owned_default_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instances: list[object] = []
+
+    class OwnedBackend(FakeBackendClient):
+        def __init__(self, _: object) -> None:
+            super().__init__()
+            self.close_calls = 0
+            instances.append(self)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    monkeypatch.setattr(scanner_api, "HttpBackendClient", OwnedBackend)
+    app = create_app(scanner=RecordingScanner())
+
+    with TestClient(app):
+        assert len(instances) == 1
+        assert instances[0].close_calls == 0  # type: ignore[attr-defined]
+
+    assert instances[0].close_calls == 1  # type: ignore[attr-defined]
+
+
+def test_app_lifespan_does_not_close_injected_backend() -> None:
+    class InjectedBackend(FakeBackendClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    backend = InjectedBackend()
+    app = create_app(scanner=RecordingScanner(), backend=backend)
+
+    with TestClient(app):
+        pass
+
+    assert backend.close_calls == 0
+
+
+def test_app_lifespan_shuts_down_owned_worker_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executors: list[object] = []
+
+    class TrackingExecutor(ThreadPoolExecutor):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            self.shutdown_calls = 0
+            executors.append(self)
+
+        def shutdown(self, *args: object, **kwargs: object) -> None:
+            self.shutdown_calls += 1
+            super().shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(scanner_api, "ThreadPoolExecutor", TrackingExecutor)
+    app = _app(RecordingScanner())
+
+    with TestClient(app):
+        assert len(executors) == 1
+        assert executors[0].shutdown_calls == 0  # type: ignore[attr-defined]
+
+    assert executors[0].shutdown_calls == 1  # type: ignore[attr-defined]
+
+
 def test_scanner_runs_in_background_thread_without_an_event_loop() -> None:
     observations: list[bool] = []
 
@@ -282,25 +401,20 @@ def test_concurrent_duplicate_registration_schedules_exactly_one_execution() -> 
     scanner = RecordingScanner(discovery=block)
     app = _app(scanner)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(
-            _post_once,
-            app,
-            "/jobs/discovery",
-            DISCOVERY_PAYLOAD,
-        )
-        assert started.wait(timeout=1)
-        second = executor.submit(
-            _post_once,
-            app,
-            "/jobs/discovery",
-            DISCOVERY_PAYLOAD,
-        )
-        try:
-            second_result = second.result(timeout=1)
-        finally:
-            release.set()
-        first_result = first.result(timeout=1)
+    with TestClient(app) as client:
+        def post() -> tuple[int, dict[str, object]]:
+            response = client.post("/jobs/discovery", json=DISCOVERY_PAYLOAD)
+            return response.status_code, response.json()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(post)
+            assert started.wait(timeout=1)
+            second = executor.submit(post)
+            try:
+                second_result = second.result(timeout=1)
+            finally:
+                release.set()
+            first_result = first.result(timeout=1)
 
     assert first_result == second_result == (
         202,
@@ -479,19 +593,23 @@ def test_same_scan_queue_cannot_saturate_workers_and_starve_another_scan() -> No
         "scan_id": "scan-other",
     }
 
-    try:
-        first = _post_once(app, "/jobs/discovery", hot_payloads[0])
-        assert first[0] == 202
-        assert hot_started.wait(timeout=1)
-        for payload in hot_payloads[1:]:
-            assert _post_once(app, "/jobs/discovery", payload)[0] == 202
+    with TestClient(app) as client:
+        try:
+            first = client.post("/jobs/discovery", json=hot_payloads[0])
+            assert first.status_code == 202
+            assert hot_started.wait(timeout=1)
+            for payload in hot_payloads[1:]:
+                assert (
+                    client.post("/jobs/discovery", json=payload).status_code
+                    == 202
+                )
 
-        other = _post_once(app, "/jobs/discovery", other_payload)
+            other = client.post("/jobs/discovery", json=other_payload)
 
-        assert other[0] == 202
-        assert other_scan_started.wait(timeout=1)
-    finally:
-        release_hot_scan.set()
+            assert other.status_code == 202
+            assert other_scan_started.wait(timeout=1)
+        finally:
+            release_hot_scan.set()
 
     assert all_hot_jobs_finished.wait(timeout=2)
     assert len(scanner.discovery_requests) == hot_job_count + 1

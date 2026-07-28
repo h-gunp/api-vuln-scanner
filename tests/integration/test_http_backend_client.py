@@ -280,6 +280,77 @@ def test_progress_posts_exact_route_body_and_auth(
 
 
 @pytest.mark.parametrize(
+    "statistics",
+    [
+        {"secret": 1},
+        {"operations": "runtime-secret"},
+        {"operations": True},
+        {"operations": math.inf},
+        {"operations": math.nan},
+        {"operations": -1},
+    ],
+)
+def test_progress_rejects_unsafe_metrics_before_sending(
+    statistics: dict[str, object],
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    client = _client(handler)
+
+    with pytest.raises(
+        BackendIntegrationError,
+        match="^backend callback payload is invalid$",
+    ) as caught:
+        client.report_progress(
+            JOB_ID,
+            ScannerStage.DISCOVERING,
+            10,
+            statistics,  # type: ignore[arg-type]
+            scan_id=SCAN_ID,
+            job_kind=JobKind.DISCOVERY,
+        )
+
+    assert requests == []
+    _assert_safe(caught.value, "runtime-secret")
+
+
+def test_progress_accepts_only_known_finite_numeric_metrics() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    client = _client(handler)
+    client.report_progress(
+        JOB_ID,
+        ScannerStage.COMPLETED,
+        100,
+        {
+            "actors": 2,
+            "operations": 3,
+            "object_types": 1,
+            "requests_used": 4,
+            "findings": 0.5,
+        },
+        scan_id=SCAN_ID,
+        job_kind=JobKind.DISCOVERY,
+    )
+
+    assert json.loads(requests[0].content)["metrics"] == {
+        "actors": 2,
+        "operations": 3,
+        "object_types": 1,
+        "requests_used": 4,
+        "findings": 0.5,
+    }
+
+
+@pytest.mark.parametrize(
     ("artifact_type", "job_kind", "expected_path", "payload"),
     [
         (
@@ -498,7 +569,6 @@ def test_http_client_rejects_missing_callback_routing_context() -> None:
 def test_transport_and_status_failures_are_fixed_and_secret_free(
     failure_kind: str,
 ) -> None:
-    submitted_secret = "submitted-password-secret"
     response_secret = "response-body-secret"
     concrete_query = "token=query-secret"
 
@@ -524,18 +594,12 @@ def test_transport_and_status_failures_are_fixed_and_secret_free(
             JOB_ID,
             ScannerStage.EXECUTING,
             50,
-            {"secret": submitted_secret},
+            {"operations": 1},
             scan_id=SCAN_ID,
             job_kind=JobKind.EXECUTION,
         )
 
-    _assert_safe(
-        caught.value,
-        TOKEN,
-        submitted_secret,
-        response_secret,
-        concrete_query,
-    )
+    _assert_safe(caught.value, TOKEN, response_secret, concrete_query)
 
 
 @pytest.mark.parametrize(

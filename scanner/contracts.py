@@ -9,6 +9,18 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+_OPAQUE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def is_opaque_identifier(value: object) -> bool:
+    """Return whether a backend routing identifier is a safe opaque value."""
+
+    return (
+        isinstance(value, str)
+        and _OPAQUE_IDENTIFIER.fullmatch(value) is not None
+    )
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -430,15 +442,23 @@ class ContractSource(StrictModel):
         return self
 
 
-class DiscoveryJobRequest(StrictModel):
+class JobRequestBase(StrictModel):
     job_id: str
     scan_id: str
+
+    @field_validator("job_id", "scan_id")
+    @classmethod
+    def require_opaque_routing_identifier(cls, value: str) -> str:
+        if not is_opaque_identifier(value):
+            raise ValueError("job routing identifier must be opaque")
+        return value
+
+
+class DiscoveryJobRequest(JobRequestBase):
     target_profile: ContractSource
 
 
-class ExecutionJobRequest(StrictModel):
-    job_id: str
-    scan_id: str
+class ExecutionJobRequest(JobRequestBase):
     target_profile: ContractSource
     normalized_api_graph: ContractSource
     relationship_analysis: ContractSource
