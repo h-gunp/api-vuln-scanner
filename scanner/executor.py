@@ -111,7 +111,6 @@ _OPAQUE_EVIDENCE_REFERENCE = re.compile(
     r"artifact:[A-Za-z0-9][A-Za-z0-9._-]*"
 )
 _MIN_RUNTIME_SUBSTRING_LENGTH = 4
-_SAFE_EVIDENCE_FIELD_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def module_for_policy(policy: str) -> str | None:
@@ -672,7 +671,6 @@ class Executor:
                 conditions=conditions,
                 affected_fields=affected_fields,
                 outcome_evidence=outcome.evidence,
-                sensitive_values=sensitive_values,
             )
             envelope = self._artifact_builder.build(
                 scan_id=scan_id,
@@ -780,7 +778,6 @@ def _project_evidence_artifact(
     conditions: tuple[str, ...],
     affected_fields: tuple[AffectedField, ...],
     outcome_evidence: Mapping[str, object],
-    sensitive_values: set[str],
 ) -> EvidenceArtifact:
     if not isinstance(outcome_evidence, Mapping):
         raise ValueError("module evidence is invalid")
@@ -792,13 +789,16 @@ def _project_evidence_artifact(
         baseline_source = outcome_evidence.get("baseline")
         variant_source = outcome_evidence.get("variant")
 
+    observed_field_paths = tuple(
+        sorted({item.field_path for item in affected_fields})
+    )
     baseline = _project_evidence_observation(
         baseline_source,
-        sensitive_values=sensitive_values,
+        observed_field_paths=observed_field_paths,
     )
     variant = _project_evidence_observation(
         variant_source,
-        sensitive_values=sensitive_values,
+        observed_field_paths=observed_field_paths,
     )
     return EvidenceArtifact(
         scan_id=scan_id,
@@ -815,7 +815,7 @@ def _project_evidence_artifact(
 def _project_evidence_observation(
     source: object,
     *,
-    sensitive_values: set[str],
+    observed_field_paths: tuple[str, ...],
 ) -> EvidenceObservation:
     if not isinstance(source, Mapping):
         raise ValueError("module evidence observation is invalid")
@@ -823,7 +823,7 @@ def _project_evidence_observation(
     if type(status_code) is not int:
         raise ValueError("module evidence status is invalid")
     json_body = source.get("json_body")
-    structure = _response_structure(json_body, sensitive_values)
+    structure = _response_structure(json_body)
     encoded_structure = json.dumps(
         structure,
         sort_keys=True,
@@ -834,23 +834,13 @@ def _project_evidence_observation(
         actor_id="user_a",
         status_code=status_code,
         response_structure_sha256=hashlib.sha256(encoded_structure).hexdigest(),
-        observed_field_paths=sorted(
-            _observed_field_paths(json_body, sensitive_values=sensitive_values)
-        ),
+        observed_field_paths=list(observed_field_paths),
     )
 
 
-def _response_structure(value: object, sensitive_values: set[str]) -> object:
+def _response_structure(value: object) -> object:
     if isinstance(value, Mapping):
-        fields = []
-        for key, item in value.items():
-            field_name = _safe_structure_field_name(key, sensitive_values)
-            fields.append(
-                {
-                    "field": field_name,
-                    "structure": _response_structure(item, sensitive_values),
-                }
-            )
+        fields = [_response_structure(item) for item in value.values()]
         return {
             "type": "object",
             "fields": sorted(
@@ -863,7 +853,7 @@ def _response_structure(value: object, sensitive_values: set[str]) -> object:
     if isinstance(value, (list, tuple)):
         structures = {
             json.dumps(
-                _response_structure(item, sensitive_values),
+                _response_structure(item),
                 sort_keys=True,
                 separators=(",", ":"),
             )
@@ -884,60 +874,6 @@ def _response_structure(value: object, sensitive_values: set[str]) -> object:
     if isinstance(value, str):
         return {"type": "string"}
     return {"type": "unknown"}
-
-
-def _safe_structure_field_name(key: object, sensitive_values: set[str]) -> str:
-    if (
-        isinstance(key, str)
-        and _SAFE_EVIDENCE_FIELD_SEGMENT.fullmatch(key) is not None
-        and _external_text_is_safe(key, sensitive_values)
-    ):
-        return key
-    return "[field]"
-
-
-def _observed_field_paths(
-    value: object,
-    *,
-    sensitive_values: set[str],
-    prefix: str = "",
-) -> set[str]:
-    if isinstance(value, Mapping):
-        paths: set[str] = set()
-        for key, item in value.items():
-            if (
-                not isinstance(key, str)
-                or _SAFE_EVIDENCE_FIELD_SEGMENT.fullmatch(key) is None
-            ):
-                continue
-            path = f"{prefix}.{key}" if prefix else key
-            if not _external_text_is_safe(path, sensitive_values):
-                continue
-            paths.update(
-                _observed_field_paths(
-                    item,
-                    sensitive_values=sensitive_values,
-                    prefix=path,
-                )
-            )
-        if not paths and prefix:
-            paths.add(prefix)
-        return paths
-    if isinstance(value, (list, tuple)):
-        array_prefix = f"{prefix}[]" if prefix else ""
-        paths: set[str] = set()
-        for item in value:
-            paths.update(
-                _observed_field_paths(
-                    item,
-                    sensitive_values=sensitive_values,
-                    prefix=array_prefix,
-                )
-            )
-        if not paths and array_prefix:
-            paths.add(array_prefix)
-        return paths
-    return {prefix} if prefix else set()
 
 
 def _external_text_is_safe(

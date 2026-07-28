@@ -674,14 +674,11 @@ def test_verified_outcome_publishes_redacted_evidence_and_verified_only_finding(
     assert decoded["baseline"]["response_structure_sha256"] == decoded["variant"][
         "response_structure_sha256"
     ]
-    assert decoded["baseline"]["observed_field_paths"] == [
-        "profile.account_id",
-        "profile.password",
-    ]
+    assert decoded["baseline"]["observed_field_paths"] == ["profile.password"]
     assert decoded["variant"] == decoded["baseline"]
 
 
-def test_response_structure_hash_depends_on_field_names_and_types_not_values() -> None:
+def test_response_structure_hash_depends_on_types_not_scalar_values() -> None:
     def artifact_for(body: object) -> dict[str, object]:
         outcome = _verified(
             evidence={
@@ -718,8 +715,60 @@ def test_response_structure_hash_depends_on_field_names_and_types_not_values() -
     assert first_hash == same_hash
     assert first_hash != different_hash
     assert first["baseline"]["observed_field_paths"] == [  # type: ignore[index]
-        "items[].account_id",
-        "items[].active",
+        "profile.password"
+    ]
+
+
+def test_evidence_omits_identifier_shaped_object_keys_and_generalizes_hash() -> None:
+    affected_fields = (
+        AffectedField(
+            location="response",
+            field_path="accounts.balance",
+            data_class="financial",
+        ),
+    )
+
+    def artifact_for(dynamic_key: str, balance: int) -> bytes:
+        runtime = _runtime()
+        assert dynamic_key not in runtime.sensitive_values()
+        outcome = _verified(
+            affected_fields=affected_fields,
+            evidence={
+                "request": {
+                    "operation_id": "GET:/api/profile",
+                    "method": "GET",
+                },
+                "response": {
+                    "status_code": 200,
+                    "json_body": {
+                        "accounts": {
+                            dynamic_key: {
+                                "balance": balance,
+                            }
+                        }
+                    },
+                    "url": "https://scanner.test/api/profile",
+                },
+            },
+        )
+        _, backend, _, _, _ = _execute(
+            _documents(("DATA-001",)),
+            modules={"DATA-001": FixedOutcomeModule(outcome)},
+            runtime=runtime,
+        )
+        return backend.fetch_artifact("artifact:1")
+
+    first_bytes = artifact_for("private_account_42", 100)
+    substitute_bytes = artifact_for("replacement_account_99", 999)
+    first = json.loads(first_bytes)
+    substitute = json.loads(substitute_bytes)
+
+    assert b"private_account_42" not in first_bytes
+    assert b"replacement_account_99" not in substitute_bytes
+    assert first["baseline"]["observed_field_paths"] == ["accounts.balance"]
+    assert substitute["baseline"]["observed_field_paths"] == ["accounts.balance"]
+    assert first["baseline"]["response_structure_sha256"] == substitute["baseline"][
+        "response_structure_sha256"
     ]
 
 
