@@ -1,6 +1,7 @@
 import type {
   AiReportResponse,
   EndpointList,
+  FindingDetail,
   FindingPage,
   ScanStatusSnapshot,
   ScanSummary,
@@ -33,6 +34,7 @@ export interface ScannerService {
   getScanStatus(scanId: string): Promise<ScanStatusSnapshot>;
   getEndpoints(scanId: string): Promise<EndpointList>;
   getFindings(scanId: string): Promise<FindingPage>;
+  getFinding(findingId: string): Promise<FindingDetail>;
   getAiReport(scanId: string): Promise<AiReportResponse>;
   downloadReport(reportId: string): Promise<ReportDownload>;
 }

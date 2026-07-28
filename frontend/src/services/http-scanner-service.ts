@@ -1,6 +1,7 @@
 import type {
   AiReportResponse,
   EndpointList,
+  FindingDetail,
   FindingPage,
   ScanStatusSnapshot,
   ScanSummary,
@@ -43,7 +44,7 @@ type ApiErrorBody = {
   };
 };
 
-const defaultBaseUrl = "http://localhost:8080";
+const defaultBaseUrl = "";
 
 function getBaseUrl() {
   return (import.meta.env.VITE_API_BASE_URL ?? defaultBaseUrl).replace(/\/$/, "");
@@ -137,10 +138,20 @@ export class HttpScannerService implements ScannerService {
       status: ScanStatusSnapshot["status"];
       stage: ScanStatusSnapshot["stage"];
       progress: number;
-      error: string | null;
+      error: {
+        code: string;
+        message: string;
+        details: unknown;
+        field_errors?: ApiFieldError[] | null;
+      } | null;
     };
     return {
-      error: result.error,
+      error: result.error && {
+        code: result.error.code,
+        message: result.error.message,
+        details: result.error.details,
+        fieldErrors: result.error.field_errors ?? [],
+      },
       progress: result.progress,
       scanId: result.scan_id,
       stage: result.stage,
@@ -200,6 +211,51 @@ export class HttpScannerService implements ScannerService {
       totalElements: result.total_elements,
       totalPages: result.total_pages,
     } satisfies FindingPage;
+  }
+
+  async getFinding(findingId: string) {
+    const response = await this.request(`/api/findings/${encodeURIComponent(findingId)}`);
+    const result = (await response.json()) as {
+      finding_id: string;
+      module_id: string;
+      severity: FindingDetail["severity"];
+      target_endpoint: { operation_id: string; method: string; path: string };
+      title: string;
+      summary: string;
+      verification: { rule_id: string; verified_conditions: string[] };
+      affected_fields: Array<Record<string, unknown>>;
+      analysis: {
+        root_cause: string;
+        attack_flow: string[];
+        impact: string;
+        recommendation: string;
+      } | null;
+      evidence: unknown;
+    };
+    return {
+      findingId: result.finding_id,
+      moduleId: result.module_id,
+      severity: result.severity,
+      targetEndpoint: {
+        operationId: result.target_endpoint.operation_id,
+        method: result.target_endpoint.method,
+        path: result.target_endpoint.path,
+      },
+      title: result.title,
+      summary: result.summary,
+      verification: {
+        ruleId: result.verification.rule_id,
+        verifiedConditions: result.verification.verified_conditions,
+      },
+      affectedFields: result.affected_fields,
+      analysis: result.analysis && {
+        rootCause: result.analysis.root_cause,
+        attackFlow: result.analysis.attack_flow,
+        impact: result.analysis.impact,
+        recommendation: result.analysis.recommendation,
+      },
+      evidence: result.evidence,
+    } satisfies FindingDetail;
   }
 
   async getAiReport(scanId: string) {

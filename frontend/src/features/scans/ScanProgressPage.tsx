@@ -35,7 +35,9 @@ export function ScanProgressPage() {
               </span>
               <em>{query.data.status}</em>
             </div>
-            {query.data.error && <p className="error">{query.data.error}</p>}
+            {query.data.error && (
+              <p className="error">{query.data.error.code}: {query.data.error.message}</p>
+            )}
           </section>
         )}
       </AsyncState>

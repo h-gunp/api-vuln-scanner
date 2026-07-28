@@ -28,6 +28,25 @@ it("renders query error and retry states", async () => {
   expect(screen.getByRole("button", { name: "다시 시도" })).toBeVisible();
 });
 
+it("keeps the overview available while the AI report is being generated", async () => {
+  class ReportPendingService extends MockScannerService {
+    override async getScanSummary() {
+      return {
+        ...(await super.getScanSummary("scan-001")),
+        reportStatus: "PENDING",
+      };
+    }
+
+    override async getAiReport(): Promise<never> {
+      throw new Error("report must not be requested while pending");
+    }
+  }
+
+  renderRoute("/scans/scan-001/overview", { service: new ReportPendingService() });
+  expect(await screen.findByText("리포트 생성 중")).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
 it("describes empty Findings without claiming safety", async () => {
   class EmptyService extends MockScannerService {
     override async getFindings() {

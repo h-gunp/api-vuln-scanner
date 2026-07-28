@@ -27,7 +27,7 @@ it("creates a scan with only the confirmed target_url and scan_config fields", a
     status: "PENDING",
     stage: "TARGET_VALIDATION",
   });
-  expect(fetchMock).toHaveBeenCalledWith("http://localhost:8080/api/scans", {
+  expect(fetchMock).toHaveBeenCalledWith("/api/scans", {
     body: JSON.stringify({ target_url: "https://example.com", scan_config: null }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
@@ -174,7 +174,7 @@ it("downloads the backend-generated report PDF by report_id", async () => {
     filename: "security-report-scan_123.pdf",
   });
   expect(fetchMock).toHaveBeenCalledWith(
-    "http://localhost:8080/api/reports/report_123/download",
+    "/api/reports/report_123/download",
     undefined,
   );
 });

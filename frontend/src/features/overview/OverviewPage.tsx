@@ -23,19 +23,20 @@ export function OverviewPage() {
   const overview = useScanSummary(scanId);
   const apis = useEndpoints(scanId);
   const results = useFindings(scanId);
-  const report = useAiReport(scanId);
+  const reportReady = overview.data?.reportStatus === "COMPLETED";
+  const report = useAiReport(scanId, reportReady);
   const loading =
     overview.isLoading ||
     apis.isLoading ||
     results.isLoading ||
-    report.isLoading;
-  const error = overview.error || apis.error || results.error || report.error;
+    (reportReady && report.isLoading);
+  const error = overview.error || apis.error || results.error || (reportReady ? report.error : null);
   const retry = () =>
     void Promise.all([
       overview.refetch(),
       apis.refetch(),
       results.refetch(),
-      report.refetch(),
+      ...(reportReady ? [report.refetch()] : []),
     ]);
   return (
     <AppShell>
@@ -45,7 +46,7 @@ export function OverviewPage() {
         description="API 노출 영역과 검증된 Finding을 한눈에 확인하세요."
       />
       <AsyncState isLoading={loading} error={error} onRetry={retry}>
-        {overview.data && apis.data && results.data && report.data && (
+        {overview.data && apis.data && results.data && (
           <>
             <section className="metrics">
               <MetricCard
@@ -132,8 +133,14 @@ export function OverviewPage() {
                 </div>
                 <p>검증된 Evidence만 사용</p>
                 <h2>의사결정용 보안 요약</h2>
-                <p>{report.data.summary}</p>
-                <span className="text-link">리포트 보기 →</span>
+                {report.data ? (
+                  <>
+                    <p>{report.data.summary}</p>
+                    <span className="text-link">리포트 보기 →</span>
+                  </>
+                ) : (
+                  <p>리포트 생성 중</p>
+                )}
               </Link>
             </div>
             <section className="recent">

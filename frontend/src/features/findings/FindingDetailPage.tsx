@@ -4,12 +4,17 @@ import { ContentHeader } from "../../components/layout/ContentHeader";
 import { AsyncState } from "../../components/ui/AsyncState";
 import { Badge } from "../../components/ui/Badge";
 import { EmptyState } from "../../components/ui/EmptyState";
-import { useFindings } from "../scans/scan-queries";
+import { useScannerService } from "../../services/service-context";
+import { useQuery } from "@tanstack/react-query";
 
 export function FindingDetailPage() {
-  const { scanId = "", findingId = "" } = useParams();
-  const query = useFindings(scanId);
-  const finding = query.data?.items.find((item) => item.findingId === findingId);
+  const { findingId = "" } = useParams();
+  const service = useScannerService();
+  const query = useQuery({
+    queryKey: ["finding", findingId],
+    queryFn: () => service.getFinding(findingId),
+  });
+  const finding = query.data;
   return (
     <AppShell>
       <ContentHeader
@@ -28,7 +33,7 @@ export function FindingDetailPage() {
             </section>
             <section className="detail-card evidence">
               <h2>Evidence</h2>
-              <p>Evidence 형식과 조회 API는 아직 백엔드 계약에 확정되지 않아 표시하지 않습니다.</p>
+              <p>{finding.evidence ? "Evidence가 제공되었습니다." : "Evidence는 아직 제공되지 않았습니다."}</p>
             </section>
           </div>
         ) : (

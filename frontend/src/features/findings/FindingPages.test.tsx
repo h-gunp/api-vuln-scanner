@@ -1,6 +1,7 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
+import { MockScannerService } from "../../services/mock/mock-scanner-service";
 import { renderRoute } from "../../test/render";
 
 it("combines module and text filtering with safety disclaimer", async () => {
@@ -11,14 +12,27 @@ it("combines module and text filtering with safety disclaimer", async () => {
   await userEvent.type(screen.getByLabelText("Finding 검색"), "missing");
   expect(screen.getByText("검색 결과가 없다는 사실은 안전함의 증명이 아닙니다.")).toBeVisible();
 });
-it("shows only confirmed Finding fields and marks evidence unavailable", async () => {
+it("shows confirmed Finding fields and the evidence availability state", async () => {
   renderRoute("/scans/scan-001/findings/finding-001");
   expect(await screen.findByText("BOLA-001")).toBeVisible();
   expect(screen.getByText("HIGH")).toBeVisible();
   expect(screen.getByText("Evidence")).toBeVisible();
-  expect(screen.getByText(/Evidence 형식과 조회 API는 아직/)).toBeVisible();
+  expect(screen.getByText("Evidence는 아직 제공되지 않았습니다.")).toBeVisible();
 });
-it("renders an explicit unknown Finding state", async () => {
+it("renders the backend error for an unknown Finding", async () => {
   renderRoute("/scans/scan-001/findings/missing");
-  expect(await screen.findByText("현재 scan의 Finding 목록에 없는 항목입니다.")).toBeVisible();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Unknown mock Finding: missing");
+});
+
+it("loads a Finding detail through the dedicated detail service", async () => {
+  class DetailOnlyService extends MockScannerService {
+    override async getFindings() {
+      return { items: [], page: 1, size: 20, totalElements: 21, totalPages: 2 };
+    }
+  }
+
+  renderRoute("/scans/scan-001/findings/finding-001", {
+    service: new DetailOnlyService(),
+  });
+  expect(await screen.findByText("객체 소유권 검증 필요")).toBeVisible();
 });

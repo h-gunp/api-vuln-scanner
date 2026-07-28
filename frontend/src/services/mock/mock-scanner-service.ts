@@ -1,6 +1,7 @@
 import type {
   AiReportResponse,
   EndpointList,
+  FindingDetail,
   FindingPage,
   ScanStatusSnapshot,
   ScanSummary,
@@ -75,7 +76,7 @@ export class MockScannerService implements ScannerService {
       plannedModuleCount: 4,
       completedModuleCount: 3,
       overallRisk: "HIGH",
-      reportStatus: "READY",
+      reportStatus: "COMPLETED",
     };
   }
 
@@ -100,6 +101,19 @@ export class MockScannerService implements ScannerService {
     assertScan(scanId);
     await delay();
     return findings;
+  }
+
+  async getFinding(findingId: string): Promise<FindingDetail> {
+    const finding = findings.items.find((item) => item.findingId === findingId);
+    if (!finding) throw new MockNotFoundError(`Unknown mock Finding: ${findingId}`);
+    await delay();
+    return {
+      ...finding,
+      verification: { ruleId: "BOLA-001", verifiedConditions: ["owner mismatch"] },
+      affectedFields: [],
+      analysis: null,
+      evidence: null,
+    };
   }
 
   async getAiReport(scanId: string): Promise<AiReportResponse> {

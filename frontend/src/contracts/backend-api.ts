@@ -24,7 +24,14 @@ export interface ScanStatusSnapshot {
   status: ScanStatus;
   stage: ScanStage;
   progress: number;
-  error: string | null;
+  error: ApiErrorDetail | null;
+}
+
+export interface ApiErrorDetail {
+  code: string;
+  message: string;
+  details: unknown;
+  fieldErrors: Array<{ field: string; reason: string }>;
 }
 
 export interface ScanSummary {
@@ -66,6 +73,18 @@ export interface FindingPage {
   size: number;
   totalElements: number;
   totalPages: number;
+}
+
+export interface FindingDetail extends Finding {
+  verification: { ruleId: string; verifiedConditions: string[] };
+  affectedFields: Array<Record<string, unknown>>;
+  analysis: {
+    rootCause: string;
+    attackFlow: string[];
+    impact: string;
+    recommendation: string;
+  } | null;
+  evidence: unknown;
 }
 
 export interface AiReportResponse {
