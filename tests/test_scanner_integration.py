@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import httpx
 import pytest
+import scanner.http_client as http_client_module
 
 from scanner.artifacts import ArtifactEnvelope
 from scanner.audit import InMemoryAuditSink
@@ -39,6 +40,26 @@ RUNTIME_VALUES = (
     "acct-b-1",
     "clear-profile-secret",
 )
+
+
+def track_scanner_http_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[httpx.Client]:
+    clients: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    class TrackingClient(real_client):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            self.close_calls = 0
+            clients.append(self)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    monkeypatch.setattr(http_client_module.httpx, "Client", TrackingClient)
+    return clients
 
 
 def profile_payload() -> dict[str, object]:
@@ -398,6 +419,7 @@ class RecordingBackend(FakeBackendClient):
         scan_id: str,
         job_kind: JobKind,
     ) -> None:
+        self.timeline.append(f"failed:{report.code}")
         super().report_error(
             job_id,
             report,
@@ -419,10 +441,32 @@ class RecordingBackend(FakeBackendClient):
         )
 
 
+class EvidenceFailingBackend(RecordingBackend):
+    def publish_artifact(
+        self,
+        envelope: ArtifactEnvelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> str:
+        if envelope.artifact_type == "evidence":
+            self.published.append(envelope)
+            self.timeline.append("artifact:evidence")
+            raise RuntimeError("raw evidence callback failure")
+        return super().publish_artifact(
+            envelope,
+            job_id=job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+
 class LocalBankTransport:
     def __init__(self, *, vulnerable: bool) -> None:
         self.vulnerable = vulnerable
         self.requests: list[dict[str, object]] = []
+        self.fail_path: str | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -437,6 +481,8 @@ class LocalBankTransport:
                 "authorization": authorization,
             }
         )
+        if request.url.path == self.fail_path:
+            raise RuntimeError("raw module transport failure")
         if request.method == "POST" and request.url.path == "/api/login":
             actor = "a" if body["username"] == "fixture-user-a" else "b"
             return httpx.Response(
@@ -651,6 +697,88 @@ def test_complete_local_discovery_and_execution_flow_is_fixed_rule_safe_and_secr
     assert "severity" not in structural
     for runtime_value in RUNTIME_VALUES:
         assert runtime_value not in rendered
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_code"),
+    [
+        ("module_exception", "EXECUTION_MODULE_FAILED"),
+        ("evidence_publish", "EXECUTION_EVIDENCE_PUBLISH_FAILED"),
+    ],
+)
+def test_execution_failure_callback_is_terminal_and_attempted_once(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+    expected_code: str,
+) -> None:
+    tracked_clients = track_scanner_http_clients(monkeypatch)
+    backend = (
+        EvidenceFailingBackend()
+        if failure_mode == "evidence_publish"
+        else RecordingBackend()
+    )
+    bank = LocalBankTransport(vulnerable=True)
+    scanner = Scanner(
+        backend,
+        transport=httpx.MockTransport(bank.handler),
+        katana_runner=NoopKatana(),
+    )
+    discovery = scanner.run_discovery(
+        DiscoveryJobRequest(
+            job_id=DISCOVERY_JOB_ID,
+            scan_id=SCAN_ID,
+            target_profile=ContractSource(inline=profile_payload()),
+        )
+    )
+    analysis = analysis_payload()
+    analysis["test_candidates"] = [analysis["test_candidates"][-1]]  # type: ignore[index]
+    plan = plan_payload(discovery.requests_used)
+    plan["steps"] = [plan["steps"][-1]]  # type: ignore[index]
+    plan["steps"][0]["order"] = 1  # type: ignore[index]
+    plan["budget"]["estimated_execution_requests"] = 1  # type: ignore[index]
+    if failure_mode == "module_exception":
+        bank.fail_path = "/api/profile"
+    execution_timeline_start = len(backend.timeline)
+    clients_before_execution = len(tracked_clients)
+
+    with pytest.raises(ExecutionJobError, match="^execution failed$"):
+        scanner.run_execution(
+            ExecutionJobRequest(
+                job_id=EXECUTION_JOB_ID,
+                scan_id=SCAN_ID,
+                target_profile=ContractSource(inline=profile_payload()),
+                normalized_api_graph=ContractSource(
+                    inline=discovery.graph.model_dump(mode="json")
+                ),
+                relationship_analysis=ContractSource(inline=analysis),
+                scan_plan=ContractSource(inline=plan),
+            )
+        )
+
+    execution_timeline = backend.timeline[execution_timeline_start:]
+    assert [event.report.code for event in backend.error_events] == [expected_code]
+    assert execution_timeline[-1] == f"failed:{expected_code}"
+    assert execution_timeline.index("approval") < execution_timeline.index(
+        f"progress:{EXECUTION_JOB_ID}:EXECUTING"
+    )
+    if failure_mode == "evidence_publish":
+        assert execution_timeline.index("artifact:evidence") < len(
+            execution_timeline
+        ) - 1
+    assert not any(
+        item == "artifact:scan_result"
+        or item
+        in {
+            f"progress:{EXECUTION_JOB_ID}:VERIFYING",
+            f"progress:{EXECUTION_JOB_ID}:COMPLETED",
+        }
+        for item in execution_timeline
+    )
+    execution_clients = tracked_clients[clients_before_execution:]
+    assert len(execution_clients) == 1
+    tracked = execution_clients[0]
+    assert tracked.close_calls == 1  # type: ignore[attr-defined]
+    assert tracked.is_closed
 
 
 def test_exact_short_runtime_plan_id_is_blocked_before_approval_report() -> None:

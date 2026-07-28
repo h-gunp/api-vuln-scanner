@@ -285,6 +285,7 @@ def test_progress_posts_exact_route_body_and_auth(
         {"secret": 1},
         {"operations": "runtime-secret"},
         {"operations": True},
+        {"operations": 0.5},
         {"operations": math.inf},
         {"operations": math.nan},
         {"operations": -1},
@@ -318,7 +319,7 @@ def test_progress_rejects_unsafe_metrics_before_sending(
     _assert_safe(caught.value, "runtime-secret")
 
 
-def test_progress_accepts_only_known_finite_numeric_metrics() -> None:
+def test_progress_accepts_only_known_nonnegative_integer_metrics() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -335,7 +336,7 @@ def test_progress_accepts_only_known_finite_numeric_metrics() -> None:
             "operations": 3,
             "object_types": 1,
             "requests_used": 4,
-            "findings": 0.5,
+            "findings": 0,
         },
         scan_id=SCAN_ID,
         job_kind=JobKind.DISCOVERY,
@@ -346,7 +347,7 @@ def test_progress_accepts_only_known_finite_numeric_metrics() -> None:
         "operations": 3,
         "object_types": 1,
         "requests_used": 4,
-        "findings": 0.5,
+        "findings": 0,
     }
 
 

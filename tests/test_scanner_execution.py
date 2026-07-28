@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import httpx
 import pytest
+import scanner.http_client as http_client_module
 
 from scanner.artifacts import ArtifactEnvelope
 from scanner.contracts import (
@@ -364,6 +365,26 @@ def transport_for(
     return httpx.MockTransport(handler)
 
 
+def track_scanner_http_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[httpx.Client]:
+    clients: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    class TrackingClient(real_client):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            self.close_calls = 0
+            clients.append(self)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    monkeypatch.setattr(http_client_module.httpx, "Client", TrackingClient)
+    return clients
+
+
 def discovery_request() -> DiscoveryJobRequest:
     return DiscoveryJobRequest(
         job_id=DISCOVERY_JOB_ID,
@@ -400,6 +421,59 @@ def discover(
     )
     outcome = scanner.run_discovery(discovery_request())
     return scanner, outcome.graph.model_dump(mode="json"), outcome.requests_used
+
+
+@pytest.mark.parametrize("outcome", ["success", "rejection", "cancellation"])
+def test_execution_closes_its_http_client_once_for_every_terminal_path(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    backend: RecordingBackend
+    if outcome == "cancellation":
+        cancelling_backend = CancelOnProgressBackend()
+        cancelling_backend.cancel_stage = ScannerStage.POLICY_VALIDATION
+        backend = cancelling_backend
+    else:
+        backend = RecordingBackend()
+    tracked_clients = track_scanner_http_clients(monkeypatch)
+    calls: list[httpx.Request] = []
+    scanner = Scanner(
+        backend,
+        transport=transport_for(calls),
+        katana_runner=NoopKatana(),
+    )
+
+    if outcome == "success":
+        discovery = scanner.run_discovery(discovery_request())
+        graph = discovery.graph.model_dump(mode="json")
+        requests_used = discovery.requests_used
+    else:
+        graph = {
+            "schema_version": "1.1",
+            "scan_id": SCAN_ID,
+            "operations": [],
+        }
+        requests_used = 4 if outcome == "rejection" else 2
+    clients_before_execution = len(tracked_clients)
+    request = execution_request(
+        ContractSource(inline=graph),
+        ContractSource(inline=empty_analysis_payload()),
+        ContractSource(inline=empty_plan_payload(requests_used)),
+    )
+
+    if outcome == "cancellation":
+        with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+            scanner.run_execution(request)
+    else:
+        execution = scanner.run_execution(request)
+        if outcome == "rejection":
+            assert execution.decision.status is ApprovalStatus.REJECTED
+
+    execution_clients = tracked_clients[clients_before_execution:]
+    assert len(execution_clients) == 1
+    tracked = execution_clients[0]
+    assert tracked.close_calls == 1  # type: ignore[attr-defined]
+    assert tracked.is_closed
 
 
 @pytest.mark.parametrize("artifact_sources", [False, True])

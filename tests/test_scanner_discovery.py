@@ -6,6 +6,7 @@ from typing import Literal
 
 import httpx
 import pytest
+import scanner.http_client as http_client_module
 
 from scanner.artifacts import ArtifactEnvelope
 from scanner.audit import InMemoryAuditSink
@@ -353,6 +354,75 @@ def discovery_transport(
         return httpx.Response(404, json={"detail": "not found"}, request=request)
 
     return httpx.MockTransport(handler)
+
+
+def track_scanner_http_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[httpx.Client]:
+    clients: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    class TrackingClient(real_client):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            self.close_calls = 0
+            clients.append(self)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    monkeypatch.setattr(http_client_module.httpx, "Client", TrackingClient)
+    return clients
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancellation"])
+def test_discovery_closes_its_http_client_once_for_every_terminal_path(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    backend = RecordingBackend()
+    tracked_clients = track_scanner_http_clients(monkeypatch)
+    calls: list[tuple[str, str, str | None]] = []
+
+    if outcome == "success":
+        transport = discovery_transport(calls)
+    else:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if outcome == "failure":
+                raise RuntimeError("raw transport failure")
+            backend.cancel(JOB_ID)
+            return httpx.Response(
+                200,
+                json={"access_token": "token-a"},
+                request=request,
+            )
+
+        transport = httpx.MockTransport(handler)
+
+    scanner = Scanner(
+        backend,
+        transport=transport,
+        katana_runner=FakeKatanaRunner(),
+    )
+    request = request_for(ContractSource(inline=profile_payload()))
+
+    if outcome == "success":
+        scanner.run_discovery(request)
+    elif outcome == "failure":
+        with pytest.raises(
+            DiscoveryJobError,
+            match="^discovery authentication failed$",
+        ):
+            scanner.run_discovery(request)
+    else:
+        with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+            scanner.run_discovery(request)
+
+    assert len(tracked_clients) == 1
+    tracked = tracked_clients[0]
+    assert tracked.close_calls == 1  # type: ignore[attr-defined]
+    assert tracked.is_closed
 
 
 def test_contract_source_loads_strict_v11_inline_and_artifact_profile() -> None:

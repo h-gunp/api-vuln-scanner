@@ -77,6 +77,45 @@ def make_client(
     )
 
 
+class CloseTrackingTransport(httpx.BaseTransport):
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={}, request=request)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def test_close_is_idempotent_and_preserves_borrowed_transport(
+    profile: TargetProfile,
+) -> None:
+    transport = CloseTrackingTransport()
+    backend = FakeBackendClient()
+    client = SafeHttpClient(
+        policy=PolicyEnforcer(profile),
+        budget=RequestBudget(
+            max_requests=3,
+            requests_per_second=100,
+            cancellation_guard=CancellationGuard(backend),
+            job_id="job-001",
+        ),
+        transport=transport,
+    )
+
+    client.close()
+    client.close()
+
+    assert transport.close_calls == 0
+    with pytest.raises(RuntimeError, match="client has been closed"):
+        client.request(
+            "GET",
+            "http://vuln-bank.local/api/accounts",
+            module_id="BOLA-001",
+        )
+
+
 def test_rejected_policy_never_reaches_transport(profile: TargetProfile):
     calls = []
     client, budget = make_client(profile, lambda request: calls.append(request) or httpx.Response(200))

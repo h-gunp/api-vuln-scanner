@@ -71,6 +71,19 @@ class ScannerRequestError(Exception):
     """A sanitized transport failure that contains no target runtime values."""
 
 
+class _BorrowedTransport(httpx.BaseTransport):
+    """Delegate requests without transferring transport ownership."""
+
+    def __init__(self, transport: httpx.BaseTransport) -> None:
+        self._transport = transport
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return self._transport.handle_request(request)
+
+    def close(self) -> None:
+        return None
+
+
 class _RuntimeJsonBody:
     """Raw response JSON that requires deliberate in-memory access."""
 
@@ -123,9 +136,28 @@ class SafeHttpClient:
     ) -> None:
         self._policy = policy
         self._budget = budget
-        self._client = httpx.Client(transport=transport, follow_redirects=False)
+        client_transport = (
+            _BorrowedTransport(transport) if transport is not None else None
+        )
+        self._client = httpx.Client(
+            transport=client_transport,
+            follow_redirects=False,
+        )
         self._redactor = redactor or Redactor()
         self._audit_sink = audit_sink
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._client.close()
+
+    def __enter__(self) -> SafeHttpClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
     def request(
         self,

@@ -20,7 +20,7 @@ from scanner.contracts import (
     ScanResult,
     VulnerabilityType,
 )
-from scanner.executor import Executor
+from scanner.executor import Executor, ExecutorFailureAlreadyReported
 from scanner.http_client import SafeHttpClient
 from scanner.integration.backend_client import FakeBackendClient, JobKind
 from scanner.modules.base import ModuleOutcome, ModuleVerdict
@@ -461,6 +461,7 @@ def _execute(
     client: SafeHttpClient | None | object = ...,
     runtime: RuntimeContext | None = None,
     audit: InMemoryAuditSink | None = None,
+    expect_failure: bool = False,
 ) -> tuple[ScanResult, FakeBackendClient, InMemoryAuditSink, RequestBudget, list]:
     backend, audit, budget, resolved_client, calls = _execution_dependencies(
         documents,
@@ -477,15 +478,31 @@ def _execute(
         artifact_builder=ArtifactBuilder(Redactor()),
         audit_sink=audit,
     )
-    result = executor.execute(
-        job_id="job-001",
-        profile=documents.profile,
-        graph=documents.graph,
-        analysis=documents.analysis,
-        plan=documents.plan,
-        runtime=runtime or _runtime(),
-        decision=decision or _decision(),
-    )
+    if expect_failure:
+        with pytest.raises(
+            ExecutorFailureAlreadyReported,
+            match="^executor failure already reported$",
+        ):
+            executor.execute(
+                job_id="job-001",
+                profile=documents.profile,
+                graph=documents.graph,
+                analysis=documents.analysis,
+                plan=documents.plan,
+                runtime=runtime or _runtime(),
+                decision=decision or _decision(),
+            )
+        result = ScanResult(scan_id="[REDACTED]", findings=[])
+    else:
+        result = executor.execute(
+            job_id="job-001",
+            profile=documents.profile,
+            graph=documents.graph,
+            analysis=documents.analysis,
+            plan=documents.plan,
+            runtime=runtime or _runtime(),
+            decision=decision or _decision(),
+        )
     assert all(
         event.job_id == "job-001"
         and event.scan_id == documents.profile.scan_id
@@ -605,6 +622,7 @@ def test_capacity_exhaustion_before_step_stops_remaining_modules_without_request
         documents,
         modules=modules,
         restored_requests=17,
+        expect_failure=True,
     )
 
     assert len(modules["BOLA-001"].calls) == 1
@@ -639,6 +657,7 @@ def test_forged_approved_decision_never_routes_forbidden_modules(
     result, backend, audit, budget, transport_calls = _execute(
         documents,
         modules={forbidden_module_id: forbidden},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -658,6 +677,7 @@ def test_nonempty_plan_without_shared_client_calls_no_module_and_reports_error()
         documents,
         modules={"DATA-001": module},
         client=None,
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -964,7 +984,7 @@ def test_not_found_and_inconclusive_outcomes_emit_no_findings_and_audit_events()
     ]
 
 
-def test_verified_evidence_upload_failure_becomes_inconclusive_without_finding() -> None:
+def test_verified_evidence_upload_failure_is_terminal_without_finding() -> None:
     documents = _documents(("DATA-001",))
     backend = FailingArtifactBackend()
     module = FixedOutcomeModule(_verified())
@@ -973,6 +993,7 @@ def test_verified_evidence_upload_failure_becomes_inconclusive_without_finding()
         documents,
         backend=backend,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -992,6 +1013,7 @@ def test_module_exception_is_reported_without_raw_error_or_runtime_values() -> N
     result, backend, audit, _, _ = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1015,6 +1037,7 @@ def test_forged_step_identifier_is_not_copied_to_audit_or_error_state() -> None:
     result, backend, audit, _, _ = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1033,6 +1056,7 @@ def test_matching_runtime_secret_operation_ids_are_rejected_before_transport() -
     result, backend, audit, budget, transport_calls = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1053,6 +1077,7 @@ def test_actual_data_module_rejects_runtime_secret_path_before_transport() -> No
     result, backend, audit, budget, transport_calls = _execute(
         documents,
         modules={"DATA-001": DataExposureModule()},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1095,6 +1120,7 @@ def test_matching_runtime_secret_input_binding_names_are_rejected_before_module(
     result, backend, audit, budget, transport_calls = _execute(
         documents,
         modules={"INPUT-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1114,6 +1140,7 @@ def test_matching_runtime_secret_candidate_ids_are_rejected_before_transport() -
     result, backend, audit, _, transport_calls = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1138,6 +1165,7 @@ def test_matching_runtime_secret_plan_ids_are_rejected_before_transport() -> Non
         documents,
         modules={"DATA-001": module},
         decision=decision,
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1168,6 +1196,7 @@ def test_matching_runtime_secret_scan_ids_are_redacted_and_rejected() -> None:
         modules={"DATA-001": module},
         decision=decision,
         runtime=runtime,
+        expect_failure=True,
     )
 
     assert result.scan_id == "[REDACTED]"
@@ -1195,6 +1224,7 @@ def test_runtime_secret_affected_field_path_is_rejected_without_finding() -> Non
     result, backend, audit, _, _ = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1256,6 +1286,7 @@ def test_malformed_verified_module_outcome_becomes_secret_free_module_failure() 
     result, backend, audit, _, _ = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1280,6 +1311,7 @@ def test_known_executor_failure_callback_error_is_not_retried_or_propagated() ->
         backend=backend,
         modules={"DATA-001": FixedOutcomeModule(malformed)},
         audit=audit,
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1307,6 +1339,7 @@ def test_string_verdict_never_falls_through_to_verified_finding() -> None:
     result, backend, audit, _, _ = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1326,6 +1359,7 @@ def test_non_string_inconclusive_reason_becomes_secret_free_module_failure() -> 
     result, backend, audit, _, _ = _execute(
         documents,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1342,6 +1376,7 @@ def test_backend_reference_containing_runtime_secret_is_not_added_to_result() ->
         documents,
         backend=backend,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1373,6 +1408,7 @@ def test_non_opaque_backend_evidence_reference_is_rejected(
         documents,
         backend=backend,
         modules={"DATA-001": module},
+        expect_failure=True,
     )
 
     assert result.findings == []
@@ -1466,6 +1502,7 @@ def test_exact_short_runtime_value_operation_identifier_is_rejected_before_trans
         documents,
         modules={"DATA-001": module},
         runtime=runtime,
+        expect_failure=True,
     )
 
     assert result.findings == []

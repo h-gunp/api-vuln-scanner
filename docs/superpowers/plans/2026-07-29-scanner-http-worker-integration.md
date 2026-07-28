@@ -583,4 +583,3 @@ only fresh results.
 git add <reviewed scanner and test files>
 git commit -m "fix(scanner): address integration review findings"
 ```
-

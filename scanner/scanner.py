@@ -43,7 +43,7 @@ from scanner.crawler.normalizer import (
     normalize_openapi,
 )
 from scanner.http_client import ResponseSnapshot, SafeHttpClient, ScannerRequestError
-from scanner.executor import Executor
+from scanner.executor import Executor, ExecutorFailureAlreadyReported
 from scanner.integration.backend_client import (
     BackendClient,
     JobKind,
@@ -236,6 +236,17 @@ class Scanner:
         self,
         request: DiscoveryJobRequest,
     ) -> DiscoveryOutcome:
+        owned_clients: list[SafeHttpClient] = []
+        try:
+            return self._run_discovery_job(request, owned_clients)
+        finally:
+            self._close_job_clients(owned_clients)
+
+    def _run_discovery_job(
+        self,
+        request: DiscoveryJobRequest,
+        owned_clients: list[SafeHttpClient],
+    ) -> DiscoveryOutcome:
         cancellation = CancellationGuard(
             self._backend,
             scan_id=request.scan_id,
@@ -256,6 +267,7 @@ class Scanner:
             redactor=Redactor(),
             audit_sink=self._audit_sink,
         )
+        owned_clients.append(client)
         session_manager = SessionManager(client)
 
         self._progress(request, ScannerStage.AUTHENTICATING, {"actors": 2})
@@ -413,6 +425,17 @@ class Scanner:
         self,
         request: ExecutionJobRequest,
     ) -> ExecutionOutcome:
+        owned_clients: list[SafeHttpClient] = []
+        try:
+            return self._run_execution_job(request, owned_clients)
+        finally:
+            self._close_job_clients(owned_clients)
+
+    def _run_execution_job(
+        self,
+        request: ExecutionJobRequest,
+        owned_clients: list[SafeHttpClient],
+    ) -> ExecutionOutcome:
         cancellation = CancellationGuard(
             self._backend,
             scan_id=request.scan_id,
@@ -480,6 +503,7 @@ class Scanner:
             redactor=Redactor(),
             audit_sink=self._audit_sink,
         )
+        owned_clients.append(client)
         rehydrating = state.runtime is None
         session_manager = SessionManager(client)
         if rehydrating:
@@ -585,15 +609,18 @@ class Scanner:
             {"requests_used": budget.requests_used},
         )
         self._check_cancellation(request, cancellation)
-        result = executor.execute(
-            job_id=request.job_id,
-            profile=profile,
-            graph=graph,
-            analysis=analysis,
-            plan=plan,
-            runtime=runtime,
-            decision=decision,
-        )
+        try:
+            result = executor.execute(
+                job_id=request.job_id,
+                profile=profile,
+                graph=graph,
+                analysis=analysis,
+                plan=plan,
+                runtime=runtime,
+                decision=decision,
+            )
+        except ExecutorFailureAlreadyReported:
+            raise ExecutionJobError("execution failed") from None
         self._check_cancellation(request, cancellation)
         self._progress(
             request,
@@ -650,6 +677,11 @@ class Scanner:
             scan_result=result,
             result_artifact_ref=result_artifact_ref,
         )
+
+    @staticmethod
+    def _close_job_clients(clients: list[SafeHttpClient]) -> None:
+        for client in reversed(clients):
+            client.close()
 
     def _load_execution_contract(
         self,

@@ -191,7 +191,7 @@ def _progress_payload(
     job_kind: JobKind,
     stage: ScannerStage,
     progress: int,
-    statistics: Mapping[str, int | float],
+    statistics: Mapping[str, int],
 ) -> dict[str, object]:
     if (
         isinstance(progress, bool)
@@ -200,18 +200,14 @@ def _progress_payload(
         or not isinstance(statistics, Mapping)
     ):
         raise BackendIntegrationError(_PAYLOAD_INVALID_ERROR)
-    metrics: dict[str, int | float] = {}
+    metrics: dict[str, int] = {}
     for name, value in statistics.items():
-        try:
-            valid_number = (
-                not isinstance(value, bool)
-                and isinstance(value, (int, float))
-                and value >= 0
-                and math.isfinite(value)
-            )
-        except (TypeError, ValueError, OverflowError):
-            valid_number = False
-        if name not in _SAFE_PROGRESS_METRICS or not valid_number:
+        if (
+            name not in _SAFE_PROGRESS_METRICS
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+        ):
             raise BackendIntegrationError(_PAYLOAD_INVALID_ERROR)
         metrics[name] = value
     return {
@@ -262,7 +258,7 @@ class ProgressEvent:
     job_id: str
     stage: ScannerStage
     progress: int
-    statistics: Mapping[str, int | float]
+    statistics: Mapping[str, int]
     scan_id: str | None = None
     job_kind: JobKind | None = None
     backend_stage: str | None = None
@@ -321,7 +317,7 @@ class BackendClient(Protocol):
         job_id: str,
         stage: ScannerStage,
         progress: int,
-        statistics: Mapping[str, int | float],
+        statistics: Mapping[str, int],
         *,
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
@@ -413,7 +409,7 @@ class FakeBackendClient:
         job_id: str,
         stage: ScannerStage,
         progress: int,
-        statistics: Mapping[str, int | float],
+        statistics: Mapping[str, int],
         *,
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
@@ -601,7 +597,7 @@ class HttpBackendClient:
         job_id: str,
         stage: ScannerStage,
         progress: int,
-        statistics: Mapping[str, int | float],
+        statistics: Mapping[str, int],
         *,
         scan_id: str | None = None,
         job_kind: JobKind | None = None,

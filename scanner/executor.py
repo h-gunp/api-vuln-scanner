@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from typing import NoReturn
 from urllib.parse import urljoin
 
 from scanner.artifacts import REDACTED, ArtifactBuilder, Redactor
@@ -112,6 +113,10 @@ _OPAQUE_EVIDENCE_REFERENCE = re.compile(
     r"artifact:[A-Za-z0-9][A-Za-z0-9._-]*"
 )
 _MIN_RUNTIME_SUBSTRING_LENGTH = 4
+
+
+class ExecutorFailureAlreadyReported(RuntimeError):
+    """Terminal Executor failure after its single backend report attempt."""
 
 
 def module_for_policy(policy: str) -> str | None:
@@ -576,6 +581,8 @@ class Executor:
                     runtime=runtime,
                     outcome=outcome,
                 )
+            except ExecutorFailureAlreadyReported:
+                raise
             except Exception:
                 self._report_failure(
                     job_id,
@@ -742,7 +749,7 @@ class Executor:
         retryable: bool,
         operation_id: str | None = None,
         module_id: str | None = None,
-    ) -> None:
+    ) -> NoReturn:
         try:
             self._backend.report_error(
                 job_id,
@@ -756,14 +763,18 @@ class Executor:
             )
         except Exception:
             pass
-        self._emit(
-            code=code,
-            level="WARNING",
-            job_id=job_id,
-            scan_id=scan_id,
-            operation_id=operation_id,
-            module_id=module_id,
-        )
+        try:
+            self._emit(
+                code=code,
+                level="WARNING",
+                job_id=job_id,
+                scan_id=scan_id,
+                operation_id=operation_id,
+                module_id=module_id,
+            )
+        except Exception:
+            pass
+        raise ExecutorFailureAlreadyReported("executor failure already reported")
 
     def _emit(
         self,
