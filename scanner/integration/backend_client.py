@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Protocol
@@ -347,6 +348,7 @@ class FakeBackendClient:
     """Local fake with no network, persistence, or backend-service behavior."""
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._artifacts: dict[str, bytes] = {}
         self._artifact_refs: dict[tuple[str, str, str], str] = {}
         self._requests_used: dict[str, int] = {}
@@ -359,7 +361,8 @@ class FakeBackendClient:
         self.artifact_events: list[ArtifactEvent] = []
 
     def set_artifact(self, ref: str, content: bytes) -> None:
-        self._artifacts[ref] = content
+        with self._lock:
+            self._artifacts[ref] = content
 
     def fetch_artifact(
         self,
@@ -369,10 +372,12 @@ class FakeBackendClient:
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
     ) -> bytes:
-        return self._artifacts[ref]
+        with self._lock:
+            return self._artifacts[ref]
 
     def set_requests_used(self, job_id: str, requests_used: int) -> None:
-        self._requests_used[job_id] = requests_used
+        with self._lock:
+            self._requests_used[job_id] = requests_used
 
     def get_requests_used(
         self,
@@ -381,7 +386,8 @@ class FakeBackendClient:
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
     ) -> int:
-        return self._requests_used.get(job_id, 0)
+        with self._lock:
+            return self._requests_used.get(job_id, 0)
 
     def report_progress(
         self,
@@ -404,20 +410,21 @@ class FakeBackendClient:
             if normalized_kind is not None
             else None
         )
-        self.progress_events.append(
-            ProgressEvent(
-                job_id,
-                stage,
-                progress,
-                dict(statistics),
-                scan_id=scan_id,
-                job_kind=normalized_kind,
-                backend_stage=(
-                    str(payload["stage"]) if payload is not None else None
-                ),
-                payload=payload,
+        with self._lock:
+            self.progress_events.append(
+                ProgressEvent(
+                    job_id,
+                    stage,
+                    progress,
+                    dict(statistics),
+                    scan_id=scan_id,
+                    job_kind=normalized_kind,
+                    backend_stage=(
+                        str(payload["stage"]) if payload is not None else None
+                    ),
+                    payload=payload,
+                )
             )
-        )
 
     def report_approval(
         self,
@@ -428,16 +435,17 @@ class FakeBackendClient:
         job_kind: JobKind | None = None,
     ) -> None:
         normalized_kind = _optional_job_kind(job_kind)
-        self.approval_decisions.append(decision)
-        self.approval_events.append(
-            ApprovalEvent(
-                job_id,
-                decision,
-                scan_id=scan_id,
-                job_kind=normalized_kind,
-                payload=_approval_payload(job_id, decision),
+        with self._lock:
+            self.approval_decisions.append(decision)
+            self.approval_events.append(
+                ApprovalEvent(
+                    job_id,
+                    decision,
+                    scan_id=scan_id,
+                    job_kind=normalized_kind,
+                    payload=_approval_payload(job_id, decision),
+                )
             )
-        )
 
     def publish_artifact(
         self,
@@ -447,26 +455,28 @@ class FakeBackendClient:
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
     ) -> str:
-        key = (envelope.scan_id, envelope.artifact_type, envelope.sha256)
-        if key not in self._artifact_refs:
-            ref = f"artifact:{len(self._artifact_refs) + 1}"
-            self._artifact_refs[key] = ref
-            self._artifacts[ref] = envelope.content
-        artifact_ref = self._artifact_refs[key]
         try:
             payload: object = json.loads(envelope.content)
         except (UnicodeDecodeError, json.JSONDecodeError):
             payload = None
-        self.artifact_events.append(
-            ArtifactEvent(
-                job_id=job_id,
-                scan_id=scan_id or envelope.scan_id,
-                job_kind=_optional_job_kind(job_kind),
-                artifact_type=envelope.artifact_type,
-                payload=payload,
-                artifact_ref=artifact_ref,
+        normalized_kind = _optional_job_kind(job_kind)
+        key = (envelope.scan_id, envelope.artifact_type, envelope.sha256)
+        with self._lock:
+            if key not in self._artifact_refs:
+                ref = f"artifact:{len(self._artifact_refs) + 1}"
+                self._artifact_refs[key] = ref
+                self._artifacts[ref] = envelope.content
+            artifact_ref = self._artifact_refs[key]
+            self.artifact_events.append(
+                ArtifactEvent(
+                    job_id=job_id,
+                    scan_id=scan_id or envelope.scan_id,
+                    job_kind=normalized_kind,
+                    artifact_type=envelope.artifact_type,
+                    payload=payload,
+                    artifact_ref=artifact_ref,
+                )
             )
-        )
         return artifact_ref
 
     def report_error(
@@ -483,22 +493,24 @@ class FakeBackendClient:
             if normalized_kind is not None
             else None
         )
-        self.error_reports.append(report)
-        self.error_events.append(
-            ErrorEvent(
-                job_id,
-                report,
-                scan_id=scan_id,
-                job_kind=normalized_kind,
-                backend_stage=(
-                    str(payload["stage"]) if payload is not None else None
-                ),
-                payload=payload,
+        with self._lock:
+            self.error_reports.append(report)
+            self.error_events.append(
+                ErrorEvent(
+                    job_id,
+                    report,
+                    scan_id=scan_id,
+                    job_kind=normalized_kind,
+                    backend_stage=(
+                        str(payload["stage"]) if payload is not None else None
+                    ),
+                    payload=payload,
+                )
             )
-        )
 
     def cancel(self, job_id: str) -> None:
-        self._cancelled_jobs.add(job_id)
+        with self._lock:
+            self._cancelled_jobs.add(job_id)
 
     def is_cancelled(
         self,
@@ -507,7 +519,8 @@ class FakeBackendClient:
         scan_id: str | None = None,
         job_kind: JobKind | None = None,
     ) -> bool:
-        return job_id in self._cancelled_jobs
+        with self._lock:
+            return job_id in self._cancelled_jobs
 
 
 class HttpBackendClient:

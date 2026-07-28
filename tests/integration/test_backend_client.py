@@ -1,4 +1,6 @@
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from scanner.artifacts import ArtifactEnvelope
 from scanner.contracts import ApprovalStatus, PlanApprovalDecision
@@ -117,3 +119,51 @@ def test_fake_backend_idempotently_reuses_artifact_ref_for_same_scan_type_and_ch
 
     assert second_ref == first_ref
     assert backend.fetch_artifact(first_ref) == content
+
+
+def test_fake_backend_concurrently_publishes_distinct_artifacts_atomically():
+    backend = FakeBackendClient()
+    start = threading.Barrier(2)
+    allocation_steps = threading.Barrier(2, timeout=0.25)
+
+    class SynchronizedArtifactRefs(
+        dict[tuple[str, str, str], str]
+    ):
+        def __len__(self) -> int:
+            size = super().__len__()
+            try:
+                allocation_steps.wait()
+            except threading.BrokenBarrierError:
+                pass
+            return size
+
+    backend._artifact_refs = SynchronizedArtifactRefs()
+
+    def envelope(number: int) -> ArtifactEnvelope:
+        content = (
+            f'{{"schema_version":"1.1","scan_id":"scan-{number}",'
+            f'"operations":[]}}'
+        ).encode()
+        return ArtifactEnvelope(
+            scan_id=f"scan-{number}",
+            artifact_type="normalized_api_graph",
+            schema_version="1.1",
+            content=content,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size=len(content),
+        )
+
+    artifacts = (envelope(1), envelope(2))
+
+    def publish(item: ArtifactEnvelope) -> str:
+        start.wait()
+        return backend.publish_artifact(item)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        refs = tuple(executor.map(publish, artifacts))
+
+    assert len(set(refs)) == 2
+    assert {
+        backend.fetch_artifact(ref)
+        for ref in refs
+    } == {item.content for item in artifacts}
