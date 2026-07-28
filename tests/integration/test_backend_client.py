@@ -4,6 +4,7 @@ from scanner.artifacts import ArtifactEnvelope
 from scanner.contracts import ApprovalStatus, PlanApprovalDecision
 from scanner.integration.backend_client import (
     FakeBackendClient,
+    JobKind,
     ScannerErrorReport,
     ScannerStage,
 )
@@ -31,9 +32,26 @@ def test_fake_backend_stores_progress_approval_artifacts_and_cancel_state():
     assert backend.fetch_artifact("profile:1") == b'{"schema_version":"1.1"}'
 
     backend.set_requests_used("job-1", 7)
-    backend.report_progress("job-1", ScannerStage.AUTHENTICATING, 20, {"actors": 1})
-    backend.report_approval("job-1", approved_decision)
-    ref = backend.publish_artifact(artifact_envelope)
+    backend.report_progress(
+        "job-1",
+        ScannerStage.AUTHENTICATING,
+        20,
+        {"actors": 1},
+        scan_id="scan-001",
+        job_kind=JobKind.DISCOVERY,
+    )
+    backend.report_approval(
+        "job-1",
+        approved_decision,
+        scan_id="scan-001",
+        job_kind=JobKind.EXECUTION,
+    )
+    ref = backend.publish_artifact(
+        artifact_envelope,
+        job_id="job-1",
+        scan_id="scan-001",
+        job_kind=JobKind.DISCOVERY,
+    )
     backend.report_error(
         "job-1",
         ScannerErrorReport(
@@ -41,6 +59,8 @@ def test_fake_backend_stores_progress_approval_artifacts_and_cancel_state():
             stage=ScannerStage.AUTHENTICATING,
             retryable=True,
         ),
+        scan_id="scan-001",
+        job_kind=JobKind.DISCOVERY,
     )
     backend.cancel("job-1")
 
@@ -49,12 +69,35 @@ def test_fake_backend_stores_progress_approval_artifacts_and_cancel_state():
     assert backend.get_requests_used("job-1") == 7
     assert backend.progress_events[-1].progress == 20
     assert backend.progress_events[-1].statistics == {"actors": 1}
+    assert backend.progress_events[-1].scan_id == "scan-001"
+    assert backend.progress_events[-1].job_kind is JobKind.DISCOVERY
+    assert backend.progress_events[-1].backend_stage == "API_DISCOVERY"
+    assert backend.progress_events[-1].payload == {
+        "stage": "API_DISCOVERY",
+        "progress": 20,
+        "message": None,
+        "metrics": {"actors": 1},
+    }
     assert backend.approval_decisions[-1].status == ApprovalStatus.APPROVED
     assert backend.error_reports[-1].code == "AUTH_UNAVAILABLE"
     assert backend.approval_events[-1].job_id == "job-1"
+    assert backend.approval_events[-1].scan_id == "scan-001"
+    assert backend.approval_events[-1].job_kind is JobKind.EXECUTION
     assert backend.approval_events[-1].decision == approved_decision
     assert backend.error_events[-1].job_id == "job-1"
+    assert backend.error_events[-1].scan_id == "scan-001"
+    assert backend.error_events[-1].job_kind is JobKind.DISCOVERY
+    assert backend.error_events[-1].backend_stage == "API_DISCOVERY"
     assert backend.error_events[-1].report.code == "AUTH_UNAVAILABLE"
+    assert backend.artifact_events[-1].job_id == "job-1"
+    assert backend.artifact_events[-1].scan_id == "scan-001"
+    assert backend.artifact_events[-1].job_kind is JobKind.DISCOVERY
+    assert backend.artifact_events[-1].payload == {
+        "schema_version": "1.1",
+        "scan_id": "scan-001",
+        "operations": [],
+    }
+    assert backend.artifact_events[-1].artifact_ref == ref
 
 
 def test_fake_backend_idempotently_reuses_artifact_ref_for_same_scan_type_and_checksum():
