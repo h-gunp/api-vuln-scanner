@@ -3,60 +3,38 @@ import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import { MockScannerService } from "../../services/mock/mock-scanner-service";
 import { renderRoute } from "../../test/render";
-const labels = [
-  "User A username",
-  "User A password",
-  "User B username",
-  "User B password",
-];
 it("shows accessible inline validation and does not call the service", async () => {
   const service = new MockScannerService();
   const spy = vi.spyOn(service, "createScan");
   renderRoute("/scans/new", { service });
   await userEvent.click(
-<<<<<<< ours
-    screen.getByRole("button", { name: /Start mock scan/ }),
-=======
-    screen.getByRole("button", { name: /Mock 스캔 시작/ }),
->>>>>>> theirs
+    screen.getByRole("button", { name: /스캔 시작/ }),
   );
   expect(screen.getByText(/http:\/\/ 또는 https:\/\//)).toBeVisible();
-  expect(screen.getAllByText("필수 입력입니다.")).toHaveLength(4);
   expect(spy).not.toHaveBeenCalled();
 });
-it("uses safe password fields, clears credentials, leaves mutation cache empty, and navigates", async () => {
+it("submits only the confirmed scan contract and navigates", async () => {
   const service = new MockScannerService();
+  const spy = vi.spyOn(service, "createScan");
   const { queryClient, router } = renderRoute("/scans/new", { service });
   await userEvent.type(
     screen.getByLabelText("Target URL"),
     "https://staging.example.test",
   );
-  for (const label of labels)
-    await userEvent.type(screen.getByLabelText(label), `temporary-${label}`);
-  expect(screen.getByLabelText("User A password")).toHaveAttribute(
-    "type",
-    "password",
-  );
-  expect(screen.getByLabelText("User A password")).toHaveAttribute(
-    "autocomplete",
-    "new-password",
-  );
   await userEvent.click(
-<<<<<<< ours
-    screen.getByRole("button", { name: /Start mock scan/ }),
-=======
-    screen.getByRole("button", { name: /Mock 스캔 시작/ }),
->>>>>>> theirs
+    screen.getByRole("button", { name: /스캔 시작/ }),
   );
   await waitFor(() =>
     expect(router.state.location.pathname).toBe("/scans/scan-001/overview"),
   );
   expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
-  expect(JSON.stringify(service.getDebugSnapshot())).not.toContain("temporary");
+  expect(spy).toHaveBeenCalledWith({
+    targetUrl: "https://staging.example.test",
+    scanConfig: null,
+  });
 });
-it("discards controlled credentials on unmount", async () => {
+it("does not render browser credential inputs", async () => {
   const view = renderRoute("/scans/new");
-  await userEvent.type(screen.getByLabelText("User A username"), "ephemeral");
+  expect(screen.queryByLabelText("User A username")).not.toBeInTheDocument();
   view.unmount();
-  expect(document.body).not.toHaveTextContent("ephemeral");
 });

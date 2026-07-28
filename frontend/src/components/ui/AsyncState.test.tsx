@@ -15,11 +15,7 @@ it("renders loading, error retry, and success deliberately", async () => {
       ready
     </AsyncState>,
   );
-<<<<<<< ours
-  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
-=======
   await userEvent.click(screen.getByRole("button", { name: "다시 시도" }));
->>>>>>> theirs
   expect(retry).toHaveBeenCalledOnce();
   view.rerender(
     <AsyncState isLoading={false} error={null}>

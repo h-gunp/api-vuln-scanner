@@ -1,18 +1,12 @@
 import { ChevronRight, ShieldCheck } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCreateScan } from "./scan-queries";
-const emptyCredentials = {
-  userA: { username: "", password: "" },
-  userB: { username: "", password: "" },
-};
 export function ScanSetupPage() {
   const navigate = useNavigate();
   const { createScan, isPending, error: submitError } = useCreateScan();
   const [targetUrl, setTargetUrl] = useState("");
-  const [credentials, setCredentials] = useState(emptyCredentials);
   const [submitted, setSubmitted] = useState(false);
-  useEffect(() => () => setCredentials(emptyCredentials), []);
   const urlValid = (() => {
     try {
       const protocol = new URL(targetUrl).protocol;
@@ -21,43 +15,11 @@ export function ScanSetupPage() {
       return false;
     }
   })();
-  const field = (
-    actor: "userA" | "userB",
-    key: "username" | "password",
-    label: string,
-  ) => (
-    <label>
-      {label}
-      <input
-        type={key === "password" ? "password" : "text"}
-        autoComplete="new-password"
-        value={credentials[actor][key]}
-        aria-invalid={submitted && !credentials[actor][key]}
-        onChange={(event) =>
-          setCredentials((current) => ({
-            ...current,
-            [actor]: { ...current[actor], [key]: event.target.value },
-          }))
-        }
-      />
-      {submitted && !credentials[actor][key] && (
-        <small className="error">필수 입력입니다.</small>
-      )}
-    </label>
-  );
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setSubmitted(true);
-    if (
-      !urlValid ||
-      !credentials.userA.username ||
-      !credentials.userA.password ||
-      !credentials.userB.username ||
-      !credentials.userB.password
-    )
-      return;
-    const result = await createScan({ targetUrl, ...credentials });
-    setCredentials(emptyCredentials);
+    if (!urlValid) return;
+    const result = await createScan({ targetUrl, scanConfig: null });
     navigate(`/scans/${result.scanId}/overview`);
   }
   return (
@@ -67,44 +29,27 @@ export function ScanSetupPage() {
           <span>V</span>
           <b>VulnScope</b>
         </div>
-<<<<<<< ours
-        <p className="eyebrow">SAFE API ASSESSMENT</p>
-        <h1>
-          See your API
-          <br />
-          <em>before attackers do.</em>
-=======
         <p className="eyebrow">안전한 API 평가</p>
         <h1>
           API를 먼저 확인하고
           <br />
           <em>공격보다 앞서 대응하세요.</em>
->>>>>>> theirs
         </h1>
         <p>
-          두 개의 테스트 계정으로 API 권한 경계를 안전하게 검증합니다.
-          자격증명은 브라우저 상태에만 머물며 제출 직후 삭제됩니다.
+          백엔드 스캔 서비스에 대상 URL을 전달해 API 보안 평가를 시작합니다.
         </p>
         <div className="trust">
           <ShieldCheck />
           <span>
-<<<<<<< ours
-            <b>Mock-only workspace</b>
-=======
-            <b>Mock 전용 작업 공간</b>
->>>>>>> theirs
-            <small>실제 네트워크 스캔은 실행하지 않습니다.</small>
+            <b>백엔드 스캔 연동</b>
+            <small>스캔 설정은 현재 확정 계약에 따라 비어 있는 값으로 전송됩니다.</small>
           </span>
         </div>
       </div>
       <form onSubmit={submit} noValidate>
-<<<<<<< ours
-        <p className="step">01 / TARGET SETUP</p>
-=======
         <p className="step">01 / 대상 설정</p>
->>>>>>> theirs
         <h2>새 스캔 시작</h2>
-        <p>테스트 대상과 격리된 사용자 계정을 입력하세요.</p>
+        <p>스캔할 API 대상 URL을 입력하세요.</p>
         <label>
           Target URL
           <input
@@ -119,26 +64,16 @@ export function ScanSetupPage() {
             </small>
           )}
         </label>
-        <div className="actors">
-          {field("userA", "username", "User A username")}
-          {field("userA", "password", "User A password")}
-          {field("userB", "username", "User B username")}
-          {field("userB", "password", "User B password")}
-        </div>
         {submitError && (
           <p className="error" role="alert">
             {submitError.message}
           </p>
         )}
         <button className="primary" disabled={isPending} type="submit">
-<<<<<<< ours
-          {isPending ? "Starting…" : "Start mock scan"}
-=======
-          {isPending ? "시작 중…" : "Mock 스캔 시작"}
->>>>>>> theirs
+          {isPending ? "시작 중…" : "스캔 시작"}
           <ChevronRight />
         </button>
-        <p className="fine">입력 정보는 저장되거나 로그에 기록되지 않습니다.</p>
+        <p className="fine">추가 인증·스캔 설정 필드는 백엔드 계약 확정 후 제공됩니다.</p>
       </form>
     </div>
   );

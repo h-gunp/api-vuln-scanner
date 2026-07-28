@@ -4,22 +4,19 @@ import { AppShell } from "../../components/layout/AppShell";
 import { ContentHeader } from "../../components/layout/ContentHeader";
 import { AsyncState } from "../../components/ui/AsyncState";
 import { Badge } from "../../components/ui/Badge";
+import { useScannerService } from "../../services/service-context";
 import { useAiReport } from "../scans/scan-queries";
-import { downloadMockReport } from "./report-download";
+import { downloadReport } from "./report-download";
 export function AiReportPage() {
   const { scanId = "" } = useParams();
+  const service = useScannerService();
   const query = useAiReport(scanId);
   return (
     <AppShell>
       <ContentHeader
-<<<<<<< ours
-        kicker="AI-GENERATED BRIEF"
-        title="Security report"
-=======
         kicker="AI 생성 요약"
         title="AI 리포트"
->>>>>>> theirs
-        description="검증된 Finding만을 기반으로 생성된 mock 보고서입니다."
+        description="백엔드가 생성한 AI 리포트입니다."
       />
       <AsyncState
         isLoading={query.isLoading}
@@ -33,51 +30,33 @@ export function AiReportPage() {
                 className="secondary"
                 to={`/scans/${scanId}/ai-report/preview`}
               >
-<<<<<<< ours
-                <FileSearch /> Preview
-=======
                 <FileSearch /> 미리보기
->>>>>>> theirs
               </Link>
               <button
                 className="primary compact"
-                onClick={() => void downloadMockReport(query.data)}
+                onClick={() => void downloadReport(service, query.data.reportId, scanId)}
               >
-<<<<<<< ours
-                Download PDF
-=======
                 PDF 다운로드
->>>>>>> theirs
               </button>
             </div>
             <article className="report">
-              <Badge tone="BOLA">{query.data.overall_risk} risk</Badge>
-<<<<<<< ours
-              <h2>Executive summary</h2>
-=======
+              <Badge tone="BOLA">{query.data.overallRisk} risk</Badge>
               <h2>핵심 요약</h2>
->>>>>>> theirs
               <p>{query.data.summary}</p>
               {query.data.findings.map((finding) => (
-                <section key={finding.finding_id}>
-                  <Link to={`/scans/${scanId}/findings/${finding.finding_id}`}>
-                    {finding.finding_id} →
+                <section key={finding.findingId}>
+                  <Link to={`/scans/${scanId}/findings/${finding.findingId}`}>
+                    {finding.findingId} →
                   </Link>
-                  <h3>{finding.root_cause}</h3>
+                  <h3>{finding.rootCause}</h3>
                   <ol>
-                    {finding.attack_flow.map((step) => (
+                    {finding.attackFlow.map((step) => (
                       <li key={step}>{step}</li>
                     ))}
                   </ol>
-<<<<<<< ours
-                  <b>Impact</b>
-                  <p>{finding.impact}</p>
-                  <b>Recommendation</b>
-=======
                   <b>영향</b>
                   <p>{finding.impact}</p>
                   <b>권장 조치</b>
->>>>>>> theirs
                   <p>{finding.recommendation}</p>
                 </section>
               ))}

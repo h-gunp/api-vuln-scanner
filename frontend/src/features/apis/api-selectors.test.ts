@@ -1,11 +1,17 @@
 import { expect, it } from "vitest";
-import { mockApiGraph } from "../../services/mock/mock-data";
+import type { Endpoint } from "../../contracts";
 import { filterOperations } from "./api-selectors";
-it("filters by method, path, input and output without mutation", () => {
-  const original = [...mockApiGraph.operations];
-  expect(filterOperations(mockApiGraph.operations, "accounts")).toHaveLength(2);
-  expect(filterOperations(mockApiGraph.operations, "BALANCE")).toHaveLength(1);
-  expect(filterOperations(mockApiGraph.operations, "POST")).toHaveLength(4);
-  expect(filterOperations(mockApiGraph.operations, "")).toEqual(original);
-  expect(mockApiGraph.operations).toEqual(original);
+
+const endpoints: Endpoint[] = [
+  { operationId: "getAccount", method: "GET", path: "/accounts/{id}" },
+  { operationId: "getBalance", method: "GET", path: "/accounts/{id}/balance" },
+  { operationId: "createAccount", method: "POST", path: "/accounts" },
+];
+it("filters confirmed endpoint fields without mutation", () => {
+  const original = [...endpoints];
+  expect(filterOperations(endpoints, "accounts")).toHaveLength(3);
+  expect(filterOperations(endpoints, "BALANCE")).toHaveLength(1);
+  expect(filterOperations(endpoints, "POST")).toHaveLength(1);
+  expect(filterOperations(endpoints, "")).toEqual(original);
+  expect(endpoints).toEqual(original);
 });

@@ -15,7 +15,7 @@ export function ContentHeader({
         <p>{description}</p>
       </div>
       <span className="status">
-        <i /> Mock scan active
+        <i /> 백엔드 스캔 연동
       </span>
     </header>
   );

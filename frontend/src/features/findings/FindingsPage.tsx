@@ -8,60 +8,47 @@ import { Badge } from "../../components/ui/Badge";
 import { DonutChart } from "../../components/ui/DonutChart";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { SearchField } from "../../components/ui/SearchField";
-import { useScanResult } from "../scans/scan-queries";
+import { useFindings } from "../scans/scan-queries";
 import { countFindingsByType } from "../overview/overview-selectors";
 import { filterFindings } from "./finding-selectors";
 export function FindingsPage() {
   const { scanId = "" } = useParams();
-  const query = useScanResult(scanId);
+  const query = useFindings(scanId);
   const [search, setSearch] = useState("");
-  const [type, setType] = useState("ALL");
+  const [moduleId, setModuleId] = useState("ALL");
   const findings = useMemo(
     () =>
-      filterFindings(query.data?.findings ?? [], {
+      filterFindings(query.data?.items ?? [], {
         query: search,
-        vulnerabilityType: type,
+        moduleId,
       }),
-    [query.data, search, type],
+    [query.data, search, moduleId],
   );
-  const counts = query.data ? countFindingsByType(query.data) : {};
+  const counts = query.data ? countFindingsByType(query.data.items) : {};
   return (
     <AppShell>
       <ContentHeader
-<<<<<<< ours
-        kicker="VERIFIED RESULTS"
-        title="Findings"
-=======
         kicker="검증 결과"
         title="Finding 목록"
->>>>>>> theirs
-        description="규칙으로 검증된 Finding과 마스킹된 Evidence를 살펴보세요."
+        description="백엔드가 반환한 Finding 요약을 살펴보세요."
       />
       <div className="filters">
         <SearchField
-<<<<<<< ours
-          label="Search findings"
-          placeholder="Search finding, operation, or field"
-=======
           label="Finding 검색"
           placeholder="Finding, operation 또는 field 검색"
->>>>>>> theirs
           value={search}
           onChange={setSearch}
         />
         <select
-<<<<<<< ours
-          aria-label="Finding type"
-=======
           aria-label="Finding 유형"
->>>>>>> theirs
-          value={type}
-          onChange={(event) => setType(event.target.value)}
+          value={moduleId}
+          onChange={(event) => setModuleId(event.target.value)}
         >
           <option>ALL</option>
-          <option>BOLA</option>
-          <option>DATA</option>
-          <option>AUTH</option>
+          <option>BOLA-001</option>
+          <option>AUTHN-001</option>
+          <option>INPUT-001</option>
+          <option>DATA-001</option>
         </select>
       </div>
       <AsyncState
@@ -72,33 +59,25 @@ export function FindingsPage() {
         {query.data && (
           <>
             <DonutChart
-<<<<<<< ours
-              label="Finding types"
-=======
               label="Finding 유형"
->>>>>>> theirs
               segments={Object.entries(counts).map(([name, value]) => ({
                 name,
                 value,
               }))}
             />
             {findings.length ? (
-<<<<<<< ours
-              <div className="table">
-=======
               <div className="table findings-results">
->>>>>>> theirs
                 {findings.map((finding) => (
                   <Link
                     className="tr"
-                    key={finding.finding_id}
-                    to={`/scans/${scanId}/findings/${finding.finding_id}`}
+                    key={finding.findingId}
+                    to={`/scans/${scanId}/findings/${finding.findingId}`}
                   >
-                    <Badge tone={finding.vulnerability_type}>
-                      {finding.vulnerability_type}
+                    <Badge tone={finding.moduleId}>
+                      {finding.moduleId}
                     </Badge>
-                    <b>{finding.operation_id}</b>
-                    <span>{finding.affected_fields[0]?.field_path}</span>
+                    <b>{finding.targetEndpoint.path}</b>
+                    <span>{finding.title}</span>
                     <ChevronRight />
                   </Link>
                 ))}

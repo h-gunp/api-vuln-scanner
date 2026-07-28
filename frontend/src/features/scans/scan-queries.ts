@@ -4,54 +4,32 @@ import type { CreateScanInput } from "../../services/scanner-service";
 import { useScannerService } from "../../services/service-context";
 
 export const scanKeys = {
-  overview: (id: string) => ["scan", id, "overview"] as const,
-  progress: (id: string) => ["scan", id, "progress"] as const,
-  apis: (id: string) => ["scan", id, "apis"] as const,
+  summary: (id: string) => ["scan", id, "summary"] as const,
+  status: (id: string) => ["scan", id, "status"] as const,
+  endpoints: (id: string) => ["scan", id, "endpoints"] as const,
   findings: (id: string) => ["scan", id, "findings"] as const,
   report: (id: string) => ["scan", id, "ai-report"] as const,
-  evidence: (ref: string) => ["evidence", ref] as const,
 };
-export function useScanOverview(id: string) {
+
+export function useScanSummary(id: string) {
   const service = useScannerService();
-  return useQuery({
-    queryKey: scanKeys.overview(id),
-    queryFn: () => service.getOverview(id),
-  });
+  return useQuery({ queryKey: scanKeys.summary(id), queryFn: () => service.getScanSummary(id) });
 }
-export function useScanProgress(id: string) {
+export function useScanStatus(id: string) {
   const service = useScannerService();
-  return useQuery({
-    queryKey: scanKeys.progress(id),
-    queryFn: () => service.getScanProgress(id),
-  });
+  return useQuery({ queryKey: scanKeys.status(id), queryFn: () => service.getScanStatus(id) });
 }
-export function useApiGraph(id: string) {
+export function useEndpoints(id: string) {
   const service = useScannerService();
-  return useQuery({
-    queryKey: scanKeys.apis(id),
-    queryFn: () => service.getApiGraph(id),
-  });
+  return useQuery({ queryKey: scanKeys.endpoints(id), queryFn: () => service.getEndpoints(id) });
 }
-export function useScanResult(id: string) {
+export function useFindings(id: string) {
   const service = useScannerService();
-  return useQuery({
-    queryKey: scanKeys.findings(id),
-    queryFn: () => service.getScanResult(id),
-  });
+  return useQuery({ queryKey: scanKeys.findings(id), queryFn: () => service.getFindings(id) });
 }
 export function useAiReport(id: string) {
   const service = useScannerService();
-  return useQuery({
-    queryKey: scanKeys.report(id),
-    queryFn: () => service.getAiReport(id),
-  });
-}
-export function useEvidence(ref: string) {
-  const service = useScannerService();
-  return useQuery({
-    queryKey: scanKeys.evidence(ref),
-    queryFn: () => service.getEvidence(ref),
-  });
+  return useQuery({ queryKey: scanKeys.report(id), queryFn: () => service.getAiReport(id) });
 }
 export function useCreateScan() {
   const service = useScannerService();
@@ -63,8 +41,7 @@ export function useCreateScan() {
     try {
       return await service.createScan(input);
     } catch (cause) {
-      const nextError =
-        cause instanceof Error ? cause : new Error("Mock scan creation failed");
+      const nextError = cause instanceof Error ? cause : new Error("스캔 생성에 실패했습니다.");
       setError(nextError);
       throw nextError;
     } finally {

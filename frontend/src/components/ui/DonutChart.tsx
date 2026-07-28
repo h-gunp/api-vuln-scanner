@@ -14,11 +14,7 @@ export function DonutChart({
         aria-label={`${label}: ${segments.map(({ name, value }) => `${name} ${value}`).join(", ")}`}
       >
         <b>{total}</b>
-<<<<<<< ours
-        <span>Total</span>
-=======
         <span>합계</span>
->>>>>>> theirs
       </div>
       <ul>
         {segments.map((segment) => (

@@ -9,17 +9,10 @@ import {
 import { useState } from "react";
 import { Link, NavLink, useParams } from "react-router-dom";
 const links = [
-<<<<<<< ours
-  ["overview", "Overview", LayoutDashboard],
-  ["apis", "APIs", Braces],
-  ["findings", "Findings", ShieldCheck],
-  ["ai-report", "AI Report", Bot],
-=======
   ["overview", "개요", LayoutDashboard],
   ["apis", "APIs", Braces],
   ["findings", "Finding", ShieldCheck],
   ["ai-report", "AI 리포트", Bot],
->>>>>>> theirs
 ] as const;
 export function Sidebar() {
   const { scanId = "scan-001" } = useParams();
@@ -37,16 +30,12 @@ export function Sidebar() {
           <span>V</span>
           <b>VulnScope</b>
         </Link>
-<<<<<<< ours
-        <p className="eyebrow">WORKSPACE</p>
-        <nav aria-label="Main navigation">
-=======
         <p className="eyebrow">작업 공간</p>
         <nav aria-label="주요 메뉴">
->>>>>>> theirs
           {links.map(([path, label, Icon]) => (
             <NavLink
               key={path}
+              className={({ isActive }) => (isActive ? "active" : undefined)}
               onClick={() => setOpen(false)}
               to={`/scans/${scanId}/${path}`}
             >
@@ -56,15 +45,9 @@ export function Sidebar() {
           ))}
         </nav>
         <div className="side-foot">
-<<<<<<< ours
-          <span className="live-dot" /> Mock workspace
+          <span className="live-dot" /> 백엔드 작업 공간
           <br />
-          <small>Local data only</small>
-=======
-          <span className="live-dot" /> Mock 작업 공간
-          <br />
-          <small>로컬 데이터만 사용</small>
->>>>>>> theirs
+          <small>API 서버 연결 사용</small>
         </div>
       </aside>
     </>

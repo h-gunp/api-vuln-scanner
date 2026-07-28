@@ -1,8 +1,8 @@
 import { createContext, useContext, type PropsWithChildren } from "react";
 import type { ScannerService } from "./scanner-service";
-import { defaultScannerService } from "./mock/mock-scanner-service";
+import { HttpScannerService } from "./http-scanner-service";
 
-const ServiceContext = createContext<ScannerService>(defaultScannerService);
+const ServiceContext = createContext<ScannerService>(new HttpScannerService());
 export function ServiceProvider({
   service,
   children,

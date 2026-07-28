@@ -1,23 +1,23 @@
-import type { NormalizedApiGraph, ScanResult } from "../../contracts";
-export function countOperationsByMethod(graph: NormalizedApiGraph) {
-  return graph.operations.reduce<Record<string, number>>(
-    (counts, operation) => ({
+import type { Endpoint, Finding } from "../../contracts";
+
+export function countOperationsByMethod(endpoints: Endpoint[]) {
+  return endpoints.reduce<Record<string, number>>(
+    (counts, endpoint) => ({
       ...counts,
-      [operation.method]: (counts[operation.method] ?? 0) + 1,
+      [endpoint.method]: (counts[endpoint.method] ?? 0) + 1,
     }),
     {},
   );
 }
-export function countFindingsByType(result: ScanResult) {
-  return result.findings.reduce<Record<string, number>>(
+export function countFindingsByType(findings: Finding[]) {
+  return findings.reduce<Record<string, number>>(
     (counts, finding) => ({
       ...counts,
-      [finding.vulnerability_type]:
-        (counts[finding.vulnerability_type] ?? 0) + 1,
+      [finding.moduleId]: (counts[finding.moduleId] ?? 0) + 1,
     }),
     {},
   );
 }
-export function selectRecentFindings(result: ScanResult, limit: number) {
-  return result.findings.slice(0, limit);
+export function selectRecentFindings(findings: Finding[], limit: number) {
+  return findings.slice(0, limit);
 }

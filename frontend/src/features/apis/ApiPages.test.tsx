@@ -2,41 +2,24 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
 import { renderRoute } from "../../test/render";
-it("searches APIs and navigates to encoded operation detail", async () => {
+
+it("searches endpoints and navigates to encoded operation detail", async () => {
   const { router } = renderRoute("/scans/scan-001/apis");
-  await screen.findByText("/api/accounts/{account_id}");
-<<<<<<< ours
-  await userEvent.type(screen.getByLabelText("Search APIs"), "balance");
-=======
-  await userEvent.type(screen.getByLabelText("API 검색"), "balance");
->>>>>>> theirs
-  expect(screen.getByText("/api/accounts/{account_id}")).toBeVisible();
-  expect(screen.queryByText("/api/profile")).not.toBeInTheDocument();
-  await userEvent.click(screen.getByText("/api/accounts/{account_id}"));
-  expect(router.state.location.pathname).toContain(
-    "GET%3A%2Fapi%2Faccounts%2F%7Baccount_id%7D",
-  );
+  await screen.findAllByText("/users/{id}");
+  await userEvent.type(screen.getByLabelText("API 검색"), "update");
+  expect(screen.getAllByText("/users/{id}")).toHaveLength(1);
+  expect(screen.queryByText("/users")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByText("updateUser"));
+  expect(router.state.location.pathname).toContain("updateUser");
 });
-it("shows contract-limited inputs and outputs", async () => {
-  renderRoute(
-    "/scans/scan-001/apis/GET%3A%2Fapi%2Faccounts%2F%7Baccount_id%7D",
-  );
-  expect(
-    await screen.findByRole("heading", { name: "/api/accounts/{account_id}" }),
-  ).toBeVisible();
-<<<<<<< ours
-  expect(screen.getByText("Inputs")).toBeVisible();
-  expect(screen.getByText("Outputs")).toBeVisible();
-=======
-  expect(screen.getByText("입력")).toBeVisible();
-  expect(screen.getByText("출력")).toBeVisible();
->>>>>>> theirs
-  expect(screen.getAllByText("account_id").length).toBeGreaterThan(0);
-  expect(screen.queryByText(/token/i)).not.toBeInTheDocument();
+it("shows only confirmed endpoint fields", async () => {
+  renderRoute("/scans/scan-001/apis/getUser");
+  expect(await screen.findByRole("heading", { name: "/users/{id}" })).toBeVisible();
+  expect(screen.getByText("Operation ID")).toBeVisible();
+  expect(screen.getByText("입출력 계약")).toBeVisible();
+  expect(screen.getByText(/현재 백엔드 계약에 포함되지 않았습니다/)).toBeVisible();
 });
 it("renders an explicit unknown operation state", async () => {
   renderRoute("/scans/scan-001/apis/UNKNOWN");
-  expect(
-    await screen.findByText("정규화된 API graph에 없는 operation입니다."),
-  ).toBeVisible();
+  expect(await screen.findByText("백엔드가 반환한 endpoint에 없는 operation입니다.")).toBeVisible();
 });

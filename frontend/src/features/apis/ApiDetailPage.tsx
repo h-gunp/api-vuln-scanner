@@ -3,29 +3,21 @@ import { AppShell } from "../../components/layout/AppShell";
 import { ContentHeader } from "../../components/layout/ContentHeader";
 import { AsyncState } from "../../components/ui/AsyncState";
 import { EmptyState } from "../../components/ui/EmptyState";
-import { useApiGraph } from "../scans/scan-queries";
+import { useEndpoints } from "../scans/scan-queries";
 export function ApiDetailPage() {
   const { scanId = "", operationId = "" } = useParams();
-  const query = useApiGraph(scanId);
-  const operation = query.data?.operations.find(
-    (item) => item.operation_id === decodeURIComponent(operationId),
+  const query = useEndpoints(scanId);
+  const operation = query.data?.items.find(
+    (item) => item.operationId === decodeURIComponent(operationId),
   );
   return (
     <AppShell>
       <ContentHeader
-<<<<<<< ours
-        kicker="API DETAIL"
-        title={operation?.path_template ?? "API not found"}
-        description={
-          operation
-            ? `${operation.method} operation contract fields`
-=======
         kicker="API 상세"
-        title={operation?.path_template ?? "API를 찾을 수 없습니다"}
+        title={operation?.path ?? "API를 찾을 수 없습니다"}
         description={
           operation
-            ? `${operation.method} operation 계약 field`
->>>>>>> theirs
+            ? `${operation.method} endpoint 계약`
             : "요청한 operation을 찾을 수 없습니다."
         }
       />
@@ -37,53 +29,20 @@ export function ApiDetailPage() {
         {operation ? (
           <div className="two-col">
             <section className="detail-card">
-<<<<<<< ours
-              <h2>Inputs</h2>
-=======
-              <h2>입력</h2>
->>>>>>> theirs
-              {operation.inputs.length ? (
-                operation.inputs.map((input) => (
-                  <div
-                    className="field"
-                    key={`${input.location}-${input.field_path}`}
-                  >
-                    <b>{input.field_path}</b>
-                    <span>
-                      {input.location} · {input.type}
-                    </span>
-                  </div>
-                ))
-              ) : (
-<<<<<<< ours
-                <p>No declared inputs</p>
-              )}
+              <h2>Endpoint</h2>
+              <div className="field"><b>Method</b><span>{operation.method}</span></div>
+              <div className="field"><b>Path</b><span>{operation.path}</span></div>
+              <div className="field"><b>Operation ID</b><span>{operation.operationId}</span></div>
             </section>
             <section className="detail-card">
-              <h2>Outputs</h2>
-=======
-                <p>정의된 입력이 없습니다</p>
-              )}
-            </section>
-            <section className="detail-card">
-              <h2>출력</h2>
->>>>>>> theirs
-              {operation.outputs.map((output) => (
-                <div className="field" key={output.field_path}>
-                  <b>{output.field_path}</b>
-                  <span>{output.type}</span>
-                </div>
-              ))}
+              <h2>입출력 계약</h2>
+              <p>endpoint의 입력·출력 상세 필드는 현재 백엔드 계약에 포함되지 않았습니다.</p>
             </section>
           </div>
         ) : (
           <EmptyState
-<<<<<<< ours
-            title="API not found"
-=======
             title="API를 찾을 수 없습니다"
->>>>>>> theirs
-            description="정규화된 API graph에 없는 operation입니다."
+            description="백엔드가 반환한 endpoint에 없는 operation입니다."
           />
         )}
       </AsyncState>

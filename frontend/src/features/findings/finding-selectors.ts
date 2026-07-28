@@ -1,20 +1,21 @@
-import type { ScanResult } from "../../contracts";
-type Finding = ScanResult["findings"][number];
+import type { Finding } from "../../contracts";
+
 export function filterFindings(
   findings: Finding[],
-  filters: { query: string; vulnerabilityType: string },
+  filters: { query: string; moduleId: string },
 ) {
   const query = filters.query.trim().toLowerCase();
   return findings.filter(
     (finding) =>
-      (filters.vulnerabilityType === "ALL" ||
-        finding.vulnerability_type === filters.vulnerabilityType) &&
+      (filters.moduleId === "ALL" || finding.moduleId === filters.moduleId) &&
       (!query ||
         [
-          finding.finding_id,
-          finding.operation_id,
-          finding.vulnerability_type,
-          ...finding.affected_fields.map((field) => field.field_path),
+          finding.findingId,
+          finding.moduleId,
+          finding.title,
+          finding.summary,
+          finding.targetEndpoint.operationId,
+          finding.targetEndpoint.path,
         ].some((value) => value.toLowerCase().includes(query))),
   );
 }

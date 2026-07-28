@@ -1,11 +1,11 @@
 import { useState, type PropsWithChildren } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ServiceProvider } from "../services/service-context";
-import { defaultScannerService } from "../services/mock/mock-scanner-service";
+import { HttpScannerService } from "../services/http-scanner-service";
 import type { ScannerService } from "../services/scanner-service";
 export function AppProviders({
   children,
-  service = defaultScannerService,
+  service = new HttpScannerService(),
 }: PropsWithChildren<{ service?: ScannerService }>) {
   const [queryClient] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),

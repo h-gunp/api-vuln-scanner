@@ -1,17 +1,47 @@
+import type {
+  AiReportResponse,
+  EndpointList,
+  FindingPage,
+  ScanStatusSnapshot,
+  ScanSummary,
+} from "../../contracts";
 import {
   MockNotFoundError,
   type CreateScanInput,
   type MockServiceDebugSnapshot,
+  type ReportDownload,
   type ScannerService,
-  type ScanProgressDetail,
 } from "../scanner-service";
-import { mockAiReport, mockApiGraph, mockScanResult } from "./mock-data";
-import { mockEvidenceByRef } from "./mock-evidence";
 
 const delay = () => new Promise((resolve) => setTimeout(resolve, 80));
 const assertScan = (scanId: string) => {
-  if (scanId !== "scan-001")
+  if (scanId !== "scan-001") {
     throw new MockNotFoundError(`Unknown mock scan: ${scanId}`);
+  }
+};
+
+const endpoints: EndpointList = {
+  items: [
+    { operationId: "listUsers", method: "GET", path: "/users" },
+    { operationId: "getUser", method: "GET", path: "/users/{id}" },
+    { operationId: "updateUser", method: "PATCH", path: "/users/{id}" },
+  ],
+};
+const findings: FindingPage = {
+  items: [
+    {
+      findingId: "finding-001",
+      moduleId: "BOLA-001",
+      severity: "HIGH",
+      targetEndpoint: endpoints.items[1],
+      title: "객체 소유권 검증 필요",
+      summary: "대상 객체에 대한 권한 검증 결과를 확인해야 합니다.",
+    },
+  ],
+  page: 0,
+  size: 20,
+  totalElements: 1,
+  totalPages: 1,
 };
 
 export class MockScannerService implements ScannerService {
@@ -19,88 +49,93 @@ export class MockScannerService implements ScannerService {
 
   async createScan(input: CreateScanInput) {
     const protocol = new URL(input.targetUrl).protocol;
-    if (protocol !== "http:" && protocol !== "https:")
+    if (protocol !== "http:" && protocol !== "https:") {
       throw new TypeError("Target URL must use HTTP or HTTPS");
+    }
     await delay();
     this.createdScanIds.add("scan-001");
-    return { scanId: "scan-001" };
+    return {
+      scanId: "scan-001",
+      status: "PENDING",
+      stage: "TARGET_VALIDATION",
+    };
   }
-  async getOverview(scanId: string) {
+
+  async getScanSummary(scanId: string): Promise<ScanSummary> {
     assertScan(scanId);
     await delay();
     return {
       scanId,
       targetUrl: "https://staging.example.test",
+      status: "RUNNING",
+      stage: "MODULE_EXECUTION",
       progress: 72,
-      stage: "Module verification",
-      reportStatus: "ready" as const,
+      apiCount: endpoints.items.length,
+      findingCount: findings.totalElements,
+      plannedModuleCount: 4,
+      completedModuleCount: 3,
+      overallRisk: "HIGH",
+      reportStatus: "READY",
     };
   }
-  async getScanProgress(scanId: string): Promise<ScanProgressDetail> {
+
+  async getScanStatus(scanId: string): Promise<ScanStatusSnapshot> {
+    const summary = await this.getScanSummary(scanId);
+    return {
+      scanId: summary.scanId,
+      status: summary.status,
+      stage: summary.stage,
+      progress: summary.progress,
+      error: null,
+    };
+  }
+
+  async getEndpoints(scanId: string): Promise<EndpointList> {
+    assertScan(scanId);
+    await delay();
+    return endpoints;
+  }
+
+  async getFindings(scanId: string): Promise<FindingPage> {
+    assertScan(scanId);
+    await delay();
+    return findings;
+  }
+
+  async getAiReport(scanId: string): Promise<AiReportResponse> {
     assertScan(scanId);
     await delay();
     return {
+      reportId: "report-001",
       scanId,
-      progress: 72,
-      currentStageId: "module-verification",
-      stages: [
+      summary: "확인된 Finding을 우선순위에 따라 검토하세요.",
+      overallRisk: "HIGH",
+      findings: [
         {
-          id: "authentication",
-          label: "Authentication",
-          description: "Validate isolated actors",
-          status: "completed",
-        },
-        {
-          id: "api-discovery",
-          label: "API discovery",
-          description: "Normalize API operations",
-          status: "completed",
-        },
-        {
-          id: "relationship-analysis",
-          label: "Relationship analysis",
-          description: "Map object data flows",
-          status: "completed",
-        },
-        {
-          id: "module-verification",
-          label: "Module verification",
-          description: "Validate evidence using approved modules",
-          status: "running",
-        },
-        {
-          id: "ai-report",
-          label: "AI Report",
-          description: "Summarize verified Findings",
-          status: "waiting",
+          findingId: "finding-001",
+          rootCause: "객체 소유권 검증 확인 필요",
+          attackFlow: ["대상 식별", "권한 검증"],
+          impact: "다른 사용자의 객체에 접근할 가능성이 있습니다.",
+          recommendation: "서버에서 객체 소유권을 검증하세요.",
         },
       ],
     };
   }
-  async getApiGraph(scanId: string) {
-    assertScan(scanId);
+
+  async downloadReport(reportId: string): Promise<ReportDownload> {
+    if (reportId !== "report-001") {
+      throw new MockNotFoundError(`Unknown mock report: ${reportId}`);
+    }
     await delay();
-    return mockApiGraph;
+    return {
+      blob: new Blob(["%PDF-1.4\\nmock report\\n%%EOF"], {
+        type: "application/pdf",
+      }),
+      filename: "vulnscope-report.pdf",
+    };
   }
-  async getScanResult(scanId: string) {
-    assertScan(scanId);
-    await delay();
-    return mockScanResult;
-  }
-  async getAiReport(scanId: string) {
-    assertScan(scanId);
-    await delay();
-    return mockAiReport;
-  }
-  async getEvidence(ref: string) {
-    await delay();
-    const result = mockEvidenceByRef[ref];
-    if (!result)
-      throw new MockNotFoundError(`Unknown redacted evidence: ${ref}`);
-    return result;
-  }
+
   getDebugSnapshot(): MockServiceDebugSnapshot {
     return { createdScanIds: [...this.createdScanIds] };
   }
 }
-export const defaultScannerService = new MockScannerService();

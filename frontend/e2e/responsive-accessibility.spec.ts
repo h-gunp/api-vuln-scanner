@@ -27,11 +27,7 @@ for (const viewport of [
         await expect(page.getByRole("button", { name: "메뉴" })).toBeVisible();
         await page.getByRole("button", { name: "메뉴" }).click();
         await expect(
-<<<<<<< ours
-          page.getByRole("link", { name: "Overview" }),
-=======
           page.getByRole("link", { name: "개요" }),
->>>>>>> theirs
         ).toBeVisible();
       }
     });

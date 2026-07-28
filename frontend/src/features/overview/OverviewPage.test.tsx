@@ -2,49 +2,36 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
 import { MockScannerService } from "../../services/mock/mock-scanner-service";
-import { mockScanResult } from "../../services/mock/mock-data";
 import { renderRoute } from "../../test/render";
 it("renders summary metrics and real detail destinations", async () => {
   const { router } = renderRoute("/scans/scan-001/overview");
   expect(screen.getByRole("status", { name: "Loading content" })).toBeVisible();
-<<<<<<< ours
-  expect(await screen.findByText("Discovered APIs")).toBeVisible();
-=======
   expect((await screen.findAllByText("API 발견 수"))[0]).toBeVisible();
->>>>>>> theirs
   for (const destination of ["progress", "apis", "findings", "ai-report"])
     expect(
       document.querySelector(`.metrics a[href$="${destination}"]`),
     ).toBeInTheDocument();
-<<<<<<< ours
-  await userEvent.click(screen.getByText("Scan pipeline"));
-=======
   await userEvent.click(screen.getByText("스캔 진행률"));
->>>>>>> theirs
   expect(router.state.location.pathname).toBe("/scans/scan-001/progress");
 });
 
 it("renders query error and retry states", async () => {
   class FailingService extends MockScannerService {
-    override async getOverview(): Promise<never> {
-      throw new Error("overview unavailable");
+    override async getScanSummary(): Promise<never> {
+      throw new Error("summary unavailable");
     }
   }
   renderRoute("/scans/scan-001/overview", { service: new FailingService() });
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "overview unavailable",
+    "summary unavailable",
   );
-<<<<<<< ours
-  expect(screen.getByRole("button", { name: "Retry" })).toBeVisible();
-=======
   expect(screen.getByRole("button", { name: "다시 시도" })).toBeVisible();
->>>>>>> theirs
 });
 
 it("describes empty Findings without claiming safety", async () => {
   class EmptyService extends MockScannerService {
-    override async getScanResult() {
-      return { ...mockScanResult, findings: [] };
+    override async getFindings() {
+      return { items: [], page: 0, size: 20, totalElements: 0, totalPages: 0 };
     }
   }
   renderRoute("/scans/scan-001/overview", { service: new EmptyService() });
@@ -56,17 +43,10 @@ it("describes empty Findings without claiming safety", async () => {
 it("renders accessible distributions and no placeholder links", async () => {
   const { container } = renderRoute("/scans/scan-001/overview");
   expect(
-<<<<<<< ours
-    await screen.findByRole("img", { name: /API methods: GET 24, POST 4/ }),
+    await screen.findByRole("img", { name: /API 메서드: GET 2, PATCH 1/ }),
   ).toBeVisible();
   expect(
-    screen.getByRole("img", { name: /Finding types: BOLA 2, DATA 1, AUTH 1/ }),
-=======
-    await screen.findByRole("img", { name: /API 메서드: GET 24, POST 4/ }),
-  ).toBeVisible();
-  expect(
-    screen.getByRole("img", { name: /Finding 유형: BOLA 2, DATA 1, AUTH 1/ }),
->>>>>>> theirs
+    screen.getByRole("img", { name: /Finding 유형: BOLA-001 1/ }),
   ).toBeVisible();
   expect(container.querySelector('a[href="#"]')).toBeNull();
   expect(screen.queryByText(/responseSummary/)).not.toBeInTheDocument();

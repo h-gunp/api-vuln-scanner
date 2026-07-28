@@ -2,36 +2,23 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
 import { renderRoute } from "../../test/render";
-it("combines type and text filtering with safety disclaimer", async () => {
+
+it("combines module and text filtering with safety disclaimer", async () => {
   renderRoute("/scans/scan-001/findings");
-<<<<<<< ours
-  await screen.findByRole("img", { name: /Finding types/ });
-  await userEvent.selectOptions(screen.getByLabelText("Finding type"), "AUTH");
-  expect(screen.getByText("GET:/api/profile")).toBeVisible();
-  await userEvent.type(screen.getByLabelText("Search findings"), "missing");
-=======
   await screen.findByRole("img", { name: /Finding 유형/ });
-  await userEvent.selectOptions(screen.getByLabelText("Finding 유형"), "AUTH");
-  expect(screen.getByText("GET:/api/profile")).toBeVisible();
+  await userEvent.selectOptions(screen.getByLabelText("Finding 유형"), "BOLA-001");
+  expect(screen.getByText("/users/{id}")).toBeVisible();
   await userEvent.type(screen.getByLabelText("Finding 검색"), "missing");
->>>>>>> theirs
-  expect(
-    screen.getByText("검색 결과가 없다는 사실은 안전함의 증명이 아닙니다."),
-  ).toBeVisible();
+  expect(screen.getByText("검색 결과가 없다는 사실은 안전함의 증명이 아닙니다.")).toBeVisible();
 });
-it("shows verification, affected fields, and redacted evidence", async () => {
+it("shows only confirmed Finding fields and marks evidence unavailable", async () => {
   renderRoute("/scans/scan-001/findings/finding-001");
-  expect(await screen.findByText("BOLA-OBJECT-OWNER-MISMATCH")).toBeVisible();
-  expect(screen.getByText("FOREIGN_OBJECT_RETURNED")).toBeVisible();
-  expect(screen.getAllByText("account_id").length).toBeGreaterThan(0);
-  expect(
-    await screen.findByText(/GET \/api\/accounts\/\[REDACTED\]/),
-  ).toBeVisible();
-  expect(document.body.textContent).not.toMatch(/Bearer\s+[A-Za-z0-9._-]+/);
+  expect(await screen.findByText("BOLA-001")).toBeVisible();
+  expect(screen.getByText("HIGH")).toBeVisible();
+  expect(screen.getByText("Evidence")).toBeVisible();
+  expect(screen.getByText(/Evidence 형식과 조회 API는 아직/)).toBeVisible();
 });
 it("renders an explicit unknown Finding state", async () => {
   renderRoute("/scans/scan-001/findings/missing");
-  expect(
-    await screen.findByText("확정된 scan result에 없는 Finding입니다."),
-  ).toBeVisible();
+  expect(await screen.findByText("현재 scan의 Finding 목록에 없는 항목입니다.")).toBeVisible();
 });
