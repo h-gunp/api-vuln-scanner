@@ -1,0 +1,513 @@
+"""HTTP job entrypoint and Background execution tests."""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
+
+import pytest
+from fastapi import FastAPI
+
+warnings.filterwarnings(
+    "ignore",
+    message="Using `httpx` with `starlette.testclient` is deprecated.*",
+)
+
+from starlette.testclient import TestClient
+
+from scanner.api import JobRegistry, create_app
+from scanner.contracts import DiscoveryJobRequest, ExecutionJobRequest
+from scanner.integration.backend_client import (
+    FakeBackendClient,
+    JobKind,
+    ScannerErrorReport,
+    ScannerStage,
+)
+from scanner.policy import CancellationRequested
+from scanner.scanner import DiscoveryJobError, ExecutionJobError
+
+
+DISCOVERY_PAYLOAD = {
+    "job_id": "backend-generated_JOB.01",
+    "scan_id": "scan-001",
+    "target_profile": {
+        "inline": {
+            "schema_version": "1.1",
+            "scan_id": "scan-001",
+        }
+    },
+}
+EXECUTION_PAYLOAD = {
+    "job_id": "backend-generated_JOB.02",
+    "scan_id": "scan-001",
+    "target_profile": {"artifact_ref": "artifacts/profile-001"},
+    "normalized_api_graph": {"artifact_ref": "artifacts/graph-001"},
+    "relationship_analysis": {"artifact_ref": "artifacts/analysis-001"},
+    "scan_plan": {"artifact_ref": "artifacts/plan-001"},
+}
+
+
+class RecordingScanner:
+    def __init__(
+        self,
+        *,
+        discovery: Callable[[DiscoveryJobRequest], None] | None = None,
+        execution: Callable[[ExecutionJobRequest], None] | None = None,
+    ) -> None:
+        self._discovery = discovery
+        self._execution = execution
+        self._lock = threading.Lock()
+        self.discovery_requests: list[DiscoveryJobRequest] = []
+        self.execution_requests: list[ExecutionJobRequest] = []
+
+    def run_discovery(self, request: DiscoveryJobRequest) -> None:
+        with self._lock:
+            self.discovery_requests.append(request)
+        if self._discovery is not None:
+            self._discovery(request)
+
+    def run_execution(self, request: ExecutionJobRequest) -> None:
+        with self._lock:
+            self.execution_requests.append(request)
+        if self._execution is not None:
+            self._execution(request)
+
+
+def _app(
+    scanner: RecordingScanner,
+    *,
+    backend: object | None = None,
+    registry: JobRegistry | None = None,
+) -> FastAPI:
+    return create_app(
+        scanner=scanner,  # type: ignore[arg-type]
+        backend=backend or FakeBackendClient(),  # type: ignore[arg-type]
+        registry=registry,
+    )
+
+
+def _post_once(
+    app: FastAPI,
+    path: str,
+    payload: dict[str, object],
+) -> tuple[int, dict[str, object]]:
+    with TestClient(app) as client:
+        response = client.post(path, json=payload)
+    return response.status_code, response.json()
+
+
+def test_discovery_endpoint_accepts_exact_contract_and_preserves_job_id() -> None:
+    scanner = RecordingScanner()
+
+    status_code, response = _post_once(
+        _app(scanner),
+        "/jobs/discovery",
+        DISCOVERY_PAYLOAD,
+    )
+
+    assert status_code == 202
+    assert response == {
+        "job_id": "backend-generated_JOB.01",
+        "accepted": True,
+    }
+    assert [
+        request.model_dump(exclude_none=True)
+        for request in scanner.discovery_requests
+    ] == [DISCOVERY_PAYLOAD]
+    assert scanner.execution_requests == []
+
+
+def test_execution_endpoint_accepts_exact_contract_and_preserves_job_id() -> None:
+    scanner = RecordingScanner()
+
+    status_code, response = _post_once(
+        _app(scanner),
+        "/jobs/execution",
+        EXECUTION_PAYLOAD,
+    )
+
+    assert status_code == 202
+    assert response == {
+        "job_id": "backend-generated_JOB.02",
+        "accepted": True,
+    }
+    assert [
+        request.model_dump(exclude_none=True)
+        for request in scanner.execution_requests
+    ] == [EXECUTION_PAYLOAD]
+    assert scanner.discovery_requests == []
+
+
+@pytest.mark.parametrize(
+    "target_profile",
+    [
+        {},
+        {
+            "inline": {"schema_version": "1.1"},
+            "artifact_ref": "artifacts/profile-001",
+        },
+    ],
+)
+def test_invalid_contract_source_returns_422_without_registering_or_running(
+    target_profile: dict[str, object],
+) -> None:
+    scanner = RecordingScanner()
+    registry = JobRegistry()
+    payload = {**DISCOVERY_PAYLOAD, "target_profile": target_profile}
+    app = _app(scanner, registry=registry)
+
+    status_code, _ = _post_once(app, "/jobs/discovery", payload)
+    retry_status, retry_response = _post_once(
+        app,
+        "/jobs/discovery",
+        DISCOVERY_PAYLOAD,
+    )
+
+    assert status_code == 422
+    assert retry_status == 202
+    assert retry_response == {
+        "job_id": "backend-generated_JOB.01",
+        "accepted": True,
+    }
+    assert len(scanner.discovery_requests) == 1
+
+
+def test_scanner_runs_in_background_thread_without_an_event_loop() -> None:
+    observations: list[bool] = []
+
+    def inspect_thread(_: DiscoveryJobRequest) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            observations.append(False)
+        else:
+            observations.append(True)
+
+    scanner = RecordingScanner(discovery=inspect_thread)
+
+    status_code, _ = _post_once(
+        _app(scanner),
+        "/jobs/discovery",
+        DISCOVERY_PAYLOAD,
+    )
+
+    assert status_code == 202
+    assert observations == [False]
+
+
+def test_duplicate_job_id_is_accepted_without_a_second_execution() -> None:
+    scanner = RecordingScanner()
+    app = _app(scanner)
+
+    first = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
+    second = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
+
+    assert first == second == (
+        202,
+        {"job_id": "backend-generated_JOB.01", "accepted": True},
+    )
+    assert len(scanner.discovery_requests) == 1
+
+
+def test_job_id_registry_is_shared_across_job_kinds() -> None:
+    scanner = RecordingScanner()
+    app = _app(scanner)
+    execution_payload = {
+        **EXECUTION_PAYLOAD,
+        "job_id": DISCOVERY_PAYLOAD["job_id"],
+    }
+
+    discovery = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
+    execution = _post_once(app, "/jobs/execution", execution_payload)
+
+    assert discovery[0] == execution[0] == 202
+    assert len(scanner.discovery_requests) == 1
+    assert scanner.execution_requests == []
+
+
+def test_concurrent_duplicate_registration_schedules_exactly_one_execution() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def block(_: DiscoveryJobRequest) -> None:
+        started.set()
+        assert release.wait(timeout=2)
+
+    scanner = RecordingScanner(discovery=block)
+    app = _app(scanner)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            _post_once,
+            app,
+            "/jobs/discovery",
+            DISCOVERY_PAYLOAD,
+        )
+        assert started.wait(timeout=1)
+        second = executor.submit(
+            _post_once,
+            app,
+            "/jobs/discovery",
+            DISCOVERY_PAYLOAD,
+        )
+        try:
+            second_result = second.result(timeout=1)
+        finally:
+            release.set()
+        first_result = first.result(timeout=1)
+
+    assert first_result == second_result == (
+        202,
+        {"job_id": "backend-generated_JOB.01", "accepted": True},
+    )
+    assert len(scanner.discovery_requests) == 1
+
+
+def test_different_job_ids_each_execute() -> None:
+    scanner = RecordingScanner()
+    app = _app(scanner)
+    second_payload = {**DISCOVERY_PAYLOAD, "job_id": "backend-job-other"}
+
+    first = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
+    second = _post_once(app, "/jobs/discovery", second_payload)
+
+    assert first[0] == second[0] == 202
+    assert [request.job_id for request in scanner.discovery_requests] == [
+        "backend-generated_JOB.01",
+        "backend-job-other",
+    ]
+
+
+class ConcurrencyScanner(RecordingScanner):
+    def __init__(self, *, rendezvous: threading.Barrier | None = None) -> None:
+        super().__init__()
+        self._rendezvous = rendezvous
+        self._active_lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.entered = 0
+        self.second_entered = threading.Event()
+        self.release = threading.Event()
+        self.rendezvous_passes = 0
+
+    def _run(self) -> None:
+        with self._active_lock:
+            self.active += 1
+            self.entered += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.entered == 2:
+                self.second_entered.set()
+        try:
+            if self._rendezvous is None:
+                assert self.release.wait(timeout=2)
+            else:
+                try:
+                    self._rendezvous.wait(timeout=1)
+                except threading.BrokenBarrierError:
+                    return
+                with self._active_lock:
+                    self.rendezvous_passes += 1
+        finally:
+            with self._active_lock:
+                self.active -= 1
+
+    def run_discovery(self, request: DiscoveryJobRequest) -> None:
+        super().run_discovery(request)
+        self._run()
+
+    def run_execution(self, request: ExecutionJobRequest) -> None:
+        super().run_execution(request)
+        self._run()
+
+
+def test_same_scan_discovery_and_execution_do_not_overlap() -> None:
+    scanner = ConcurrencyScanner()
+    app = _app(scanner)
+    start = threading.Barrier(2)
+
+    def submit(path: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+        start.wait(timeout=1)
+        return _post_once(app, path, payload)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        discovery = executor.submit(
+            submit,
+            "/jobs/discovery",
+            DISCOVERY_PAYLOAD,
+        )
+        execution = executor.submit(
+            submit,
+            "/jobs/execution",
+            EXECUTION_PAYLOAD,
+        )
+        assert not scanner.second_entered.wait(timeout=0.5)
+        scanner.release.set()
+        discovery_result = discovery.result(timeout=2)
+        execution_result = execution.result(timeout=2)
+
+    assert discovery_result[0] == execution_result[0] == 202
+    assert scanner.entered == 2
+    assert scanner.max_active == 1
+
+
+def test_different_scan_ids_execute_concurrently() -> None:
+    scanner = ConcurrencyScanner(rendezvous=threading.Barrier(2))
+    app = _app(scanner)
+    start = threading.Barrier(2)
+    other_scan_payload = {
+        **EXECUTION_PAYLOAD,
+        "job_id": "backend-job-other-scan",
+        "scan_id": "scan-002",
+    }
+
+    def submit(path: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+        start.wait(timeout=1)
+        return _post_once(app, path, payload)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        discovery = executor.submit(
+            submit,
+            "/jobs/discovery",
+            DISCOVERY_PAYLOAD,
+        )
+        execution = executor.submit(
+            submit,
+            "/jobs/execution",
+            other_scan_payload,
+        )
+        discovery_result = discovery.result(timeout=2)
+        execution_result = execution.result(timeout=2)
+
+    assert discovery_result[0] == execution_result[0] == 202
+    assert scanner.rendezvous_passes == 2
+    assert scanner.max_active == 2
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "job_kind", "error_type"),
+    [
+        (
+            "/jobs/discovery",
+            DISCOVERY_PAYLOAD,
+            JobKind.DISCOVERY,
+            DiscoveryJobError,
+        ),
+        (
+            "/jobs/execution",
+            EXECUTION_PAYLOAD,
+            JobKind.EXECUTION,
+            ExecutionJobError,
+        ),
+    ],
+)
+def test_known_scanner_failure_is_not_reported_twice(
+    path: str,
+    payload: dict[str, object],
+    job_kind: JobKind,
+    error_type: type[Exception],
+) -> None:
+    backend = FakeBackendClient()
+
+    def fail(request: DiscoveryJobRequest | ExecutionJobRequest) -> None:
+        backend.report_error(
+            request.job_id,
+            ScannerErrorReport(
+                code="ALREADY_REPORTED",
+                stage=ScannerStage.PROFILE_LOADING,
+                retryable=False,
+            ),
+            scan_id=request.scan_id,
+            job_kind=job_kind,
+        )
+        raise error_type("fixed scanner failure")
+
+    scanner = RecordingScanner(
+        discovery=fail if job_kind is JobKind.DISCOVERY else None,  # type: ignore[arg-type]
+        execution=fail if job_kind is JobKind.EXECUTION else None,  # type: ignore[arg-type]
+    )
+
+    status_code, _ = _post_once(
+        _app(scanner, backend=backend),
+        path,
+        payload,
+    )
+
+    assert status_code == 202
+    assert len(backend.error_events) == 1
+    assert backend.error_events[0].report.code == "ALREADY_REPORTED"
+
+
+def test_cancellation_does_not_emit_a_failed_callback() -> None:
+    backend = FakeBackendClient()
+
+    def cancel(_: DiscoveryJobRequest) -> None:
+        raise CancellationRequested("fixed cancellation")
+
+    scanner = RecordingScanner(discovery=cancel)
+
+    status_code, _ = _post_once(
+        _app(scanner, backend=backend),
+        "/jobs/discovery",
+        DISCOVERY_PAYLOAD,
+    )
+
+    assert status_code == 202
+    assert backend.error_events == []
+
+
+def test_unexpected_failure_emits_one_fixed_secret_free_callback_and_stays_seen() -> None:
+    backend = FakeBackendClient()
+
+    def fail(_: ExecutionJobRequest) -> None:
+        raise RuntimeError("unexpected secret=raw-runtime-token")
+
+    scanner = RecordingScanner(execution=fail)
+    app = _app(scanner, backend=backend)
+
+    first = _post_once(app, "/jobs/execution", EXECUTION_PAYLOAD)
+    retry = _post_once(app, "/jobs/execution", EXECUTION_PAYLOAD)
+
+    assert first == retry == (
+        202,
+        {"job_id": "backend-generated_JOB.02", "accepted": True},
+    )
+    assert len(scanner.execution_requests) == 1
+    assert len(backend.error_events) == 1
+    event = backend.error_events[0]
+    assert event.job_id == "backend-generated_JOB.02"
+    assert event.scan_id == "scan-001"
+    assert event.job_kind is JobKind.EXECUTION
+    assert event.report == ScannerErrorReport(
+        code="SCANNER_UNEXPECTED_ERROR",
+        stage=ScannerStage.PROFILE_LOADING,
+        retryable=False,
+    )
+    assert "raw-runtime-token" not in repr(event)
+
+
+def test_unexpected_failure_reporting_error_is_swallowed_and_job_stays_seen() -> None:
+    class FailingBackend:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def report_error(self, *_: object, **__: object) -> None:
+            self.attempts += 1
+            raise RuntimeError("callback unavailable")
+
+    backend = FailingBackend()
+
+    def fail(_: DiscoveryJobRequest) -> None:
+        raise RuntimeError("unexpected scanner failure")
+
+    scanner = RecordingScanner(discovery=fail)
+    app = _app(scanner, backend=backend)
+
+    first = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
+    retry = _post_once(app, "/jobs/discovery", DISCOVERY_PAYLOAD)
+
+    assert first[0] == retry[0] == 202
+    assert len(scanner.discovery_requests) == 1
+    assert backend.attempts == 1

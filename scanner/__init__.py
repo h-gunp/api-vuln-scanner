@@ -1,5 +1,6 @@
 """API vulnerability scanner worker package."""
 
+from scanner.api import JobRegistry, app, create_app
 from scanner.scanner import (
     DiscoveryJobError,
     DiscoveryOutcome,
@@ -13,5 +14,8 @@ __all__ = [
     "DiscoveryOutcome",
     "ExecutionJobError",
     "ExecutionOutcome",
+    "JobRegistry",
     "Scanner",
+    "app",
+    "create_app",
 ]
