@@ -19,6 +19,7 @@ export function ApiListPage() {
   return (
     <AppShell>
       <ContentHeader
+<<<<<<< ours
         kicker="API INVENTORY"
         title="Discovered APIs"
         description="정규화된 API graph의 operation을 탐색하세요."
@@ -26,6 +27,15 @@ export function ApiListPage() {
       <SearchField
         label="Search APIs"
         placeholder="Search method, path, or field"
+=======
+        kicker="API 목록"
+        title="발견된 API"
+        description="정규화된 API graph의 operation을 탐색하세요."
+      />
+      <SearchField
+        label="API 검색"
+        placeholder="method, path 또는 field 검색"
+>>>>>>> theirs
         value={search}
         onChange={setSearch}
       />
@@ -39,7 +49,11 @@ export function ApiListPage() {
             <div className="tr th">
               <span>Method</span>
               <span>Path</span>
+<<<<<<< ours
               <span>Outputs</span>
+=======
+              <span>출력</span>
+>>>>>>> theirs
               <span />
             </div>
             {operations.map((operation) => (
@@ -50,7 +64,11 @@ export function ApiListPage() {
               >
                 <span className="method">{operation.method}</span>
                 <b>{operation.path_template}</b>
+<<<<<<< ours
                 <span>{operation.outputs.length} fields</span>
+=======
+                <span>{operation.outputs.length}개 field</span>
+>>>>>>> theirs
                 <ChevronRight />
               </Link>
             ))}

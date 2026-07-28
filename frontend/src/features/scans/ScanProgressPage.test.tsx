@@ -16,6 +16,10 @@ it("renders overall progress and all five textual stages", async () => {
     expect(within(detail).getByText(label)).toBeVisible();
   for (const status of ["completed", "running", "waiting"])
     expect(screen.getAllByText(status).length).toBeGreaterThan(0);
+<<<<<<< ours
   await userEvent.click(screen.getByRole("link", { name: /Back to overview/ }));
+=======
+  await userEvent.click(screen.getByRole("link", { name: /개요로 돌아가기/ }));
+>>>>>>> theirs
   expect(router.state.location.pathname).toBe("/scans/scan-001/overview");
 });

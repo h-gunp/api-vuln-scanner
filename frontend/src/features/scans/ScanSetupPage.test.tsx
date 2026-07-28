@@ -14,7 +14,11 @@ it("shows accessible inline validation and does not call the service", async () 
   const spy = vi.spyOn(service, "createScan");
   renderRoute("/scans/new", { service });
   await userEvent.click(
+<<<<<<< ours
     screen.getByRole("button", { name: /Start mock scan/ }),
+=======
+    screen.getByRole("button", { name: /Mock 스캔 시작/ }),
+>>>>>>> theirs
   );
   expect(screen.getByText(/http:\/\/ 또는 https:\/\//)).toBeVisible();
   expect(screen.getAllByText("필수 입력입니다.")).toHaveLength(4);
@@ -38,7 +42,11 @@ it("uses safe password fields, clears credentials, leaves mutation cache empty, 
     "new-password",
   );
   await userEvent.click(
+<<<<<<< ours
     screen.getByRole("button", { name: /Start mock scan/ }),
+=======
+    screen.getByRole("button", { name: /Mock 스캔 시작/ }),
+>>>>>>> theirs
   );
   await waitFor(() =>
     expect(router.state.location.pathname).toBe("/scans/scan-001/overview"),

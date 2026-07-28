@@ -20,9 +20,19 @@ it("renders every report Finding once with ordered attack flow", async () => {
 it("navigates to print preview", async () => {
   const { router } = renderRoute("/scans/scan-001/ai-report");
   await screen.findByText(/검증된 API 취약점 4건/);
+<<<<<<< ours
   await userEvent.click(screen.getByRole("link", { name: "Preview" }));
   expect(router.state.location.pathname).toMatch(/preview$/);
   expect(await screen.findByText("VulnScope Security Report")).toBeVisible();
+=======
+  await userEvent.click(screen.getByRole("link", { name: "미리보기" }));
+  expect(router.state.location.pathname).toMatch(/preview$/);
+  expect(await screen.findByText("VulnScope 보안 리포트")).toBeVisible();
+  await userEvent.click(
+    screen.getByRole("link", { name: /AI 리포트로 돌아가기/ }),
+  );
+  expect(router.state.location.pathname).toBe("/scans/scan-001/ai-report");
+>>>>>>> theirs
 });
 it("downloads a valid named PDF without sensitive text", async () => {
   const create = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:mock");
@@ -34,7 +44,11 @@ it("downloads a valid named PDF without sensitive text", async () => {
     .mockImplementation(() => undefined);
   renderRoute("/scans/scan-001/ai-report");
   await screen.findByText(/검증된 API 취약점 4건/);
+<<<<<<< ours
   await userEvent.click(screen.getByRole("button", { name: "Download PDF" }));
+=======
+  await userEvent.click(screen.getByRole("button", { name: "PDF 다운로드" }));
+>>>>>>> theirs
   await vi.waitFor(() => expect(click).toHaveBeenCalled());
   expect(create).toHaveBeenCalled();
   expect(revoke).toHaveBeenCalledWith("blob:mock");

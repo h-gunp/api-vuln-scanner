@@ -67,11 +67,19 @@ export function ScanSetupPage() {
           <span>V</span>
           <b>VulnScope</b>
         </div>
+<<<<<<< ours
         <p className="eyebrow">SAFE API ASSESSMENT</p>
         <h1>
           See your API
           <br />
           <em>before attackers do.</em>
+=======
+        <p className="eyebrow">안전한 API 평가</p>
+        <h1>
+          API를 먼저 확인하고
+          <br />
+          <em>공격보다 앞서 대응하세요.</em>
+>>>>>>> theirs
         </h1>
         <p>
           두 개의 테스트 계정으로 API 권한 경계를 안전하게 검증합니다.
@@ -80,13 +88,21 @@ export function ScanSetupPage() {
         <div className="trust">
           <ShieldCheck />
           <span>
+<<<<<<< ours
             <b>Mock-only workspace</b>
+=======
+            <b>Mock 전용 작업 공간</b>
+>>>>>>> theirs
             <small>실제 네트워크 스캔은 실행하지 않습니다.</small>
           </span>
         </div>
       </div>
       <form onSubmit={submit} noValidate>
+<<<<<<< ours
         <p className="step">01 / TARGET SETUP</p>
+=======
+        <p className="step">01 / 대상 설정</p>
+>>>>>>> theirs
         <h2>새 스캔 시작</h2>
         <p>테스트 대상과 격리된 사용자 계정을 입력하세요.</p>
         <label>
@@ -115,7 +131,11 @@ export function ScanSetupPage() {
           </p>
         )}
         <button className="primary" disabled={isPending} type="submit">
+<<<<<<< ours
           {isPending ? "Starting…" : "Start mock scan"}
+=======
+          {isPending ? "시작 중…" : "Mock 스캔 시작"}
+>>>>>>> theirs
           <ChevronRight />
         </button>
         <p className="fine">입력 정보는 저장되거나 로그에 기록되지 않습니다.</p>

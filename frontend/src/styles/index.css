@@ -1,5 +1,9 @@
 :root {
+<<<<<<< ours
   font-family: "DM Sans", sans-serif;
+=======
+  font-family: "DM Sans", "Noto Sans KR", "Malgun Gothic", sans-serif;
+>>>>>>> theirs
   color: #17151f;
   background: #f7f7f9;
 }
@@ -573,6 +577,15 @@ aside nav a.active {
 }
 .filters select {
   height: 43px;
+<<<<<<< ours
+=======
+  min-width: 120px;
+  color: #17151f;
+  line-height: 1.4;
+}
+.findings-results {
+  margin-top: 32px;
+>>>>>>> theirs
 }
 .empty {
   text-align: center;
@@ -591,6 +604,13 @@ aside nav a.active {
   gap: 8px;
   margin-bottom: 12px;
 }
+<<<<<<< ours
+=======
+.back svg {
+  width: 17px;
+  vertical-align: middle;
+}
+>>>>>>> theirs
 .secondary {
   background: white;
   border: 1px solid #ded9e2;

@@ -28,19 +28,33 @@ export function FindingsPage() {
   return (
     <AppShell>
       <ContentHeader
+<<<<<<< ours
         kicker="VERIFIED RESULTS"
         title="Findings"
+=======
+        kicker="검증 결과"
+        title="Finding 목록"
+>>>>>>> theirs
         description="규칙으로 검증된 Finding과 마스킹된 Evidence를 살펴보세요."
       />
       <div className="filters">
         <SearchField
+<<<<<<< ours
           label="Search findings"
           placeholder="Search finding, operation, or field"
+=======
+          label="Finding 검색"
+          placeholder="Finding, operation 또는 field 검색"
+>>>>>>> theirs
           value={search}
           onChange={setSearch}
         />
         <select
+<<<<<<< ours
           aria-label="Finding type"
+=======
+          aria-label="Finding 유형"
+>>>>>>> theirs
           value={type}
           onChange={(event) => setType(event.target.value)}
         >
@@ -58,14 +72,22 @@ export function FindingsPage() {
         {query.data && (
           <>
             <DonutChart
+<<<<<<< ours
               label="Finding types"
+=======
+              label="Finding 유형"
+>>>>>>> theirs
               segments={Object.entries(counts).map(([name, value]) => ({
                 name,
                 value,
               }))}
             />
             {findings.length ? (
+<<<<<<< ours
               <div className="table">
+=======
+              <div className="table findings-results">
+>>>>>>> theirs
                 {findings.map((finding) => (
                   <Link
                     className="tr"

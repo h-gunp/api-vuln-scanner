@@ -25,7 +25,11 @@ export function AsyncState({
         <p>{error.message}</p>
         {onRetry && (
           <button className="secondary" onClick={onRetry}>
+<<<<<<< ours
             Retry
+=======
+            다시 시도
+>>>>>>> theirs
           </button>
         )}
       </div>

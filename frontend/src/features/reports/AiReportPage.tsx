@@ -12,8 +12,13 @@ export function AiReportPage() {
   return (
     <AppShell>
       <ContentHeader
+<<<<<<< ours
         kicker="AI-GENERATED BRIEF"
         title="Security report"
+=======
+        kicker="AI 생성 요약"
+        title="AI 리포트"
+>>>>>>> theirs
         description="검증된 Finding만을 기반으로 생성된 mock 보고서입니다."
       />
       <AsyncState
@@ -28,18 +33,30 @@ export function AiReportPage() {
                 className="secondary"
                 to={`/scans/${scanId}/ai-report/preview`}
               >
+<<<<<<< ours
                 <FileSearch /> Preview
+=======
+                <FileSearch /> 미리보기
+>>>>>>> theirs
               </Link>
               <button
                 className="primary compact"
                 onClick={() => void downloadMockReport(query.data)}
               >
+<<<<<<< ours
                 Download PDF
+=======
+                PDF 다운로드
+>>>>>>> theirs
               </button>
             </div>
             <article className="report">
               <Badge tone="BOLA">{query.data.overall_risk} risk</Badge>
+<<<<<<< ours
               <h2>Executive summary</h2>
+=======
+              <h2>핵심 요약</h2>
+>>>>>>> theirs
               <p>{query.data.summary}</p>
               {query.data.findings.map((finding) => (
                 <section key={finding.finding_id}>
@@ -52,9 +69,15 @@ export function AiReportPage() {
                       <li key={step}>{step}</li>
                     ))}
                   </ol>
+<<<<<<< ours
                   <b>Impact</b>
                   <p>{finding.impact}</p>
                   <b>Recommendation</b>
+=======
+                  <b>영향</b>
+                  <p>{finding.impact}</p>
+                  <b>권장 조치</b>
+>>>>>>> theirs
                   <p>{finding.recommendation}</p>
                 </section>
               ))}

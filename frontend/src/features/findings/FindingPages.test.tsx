@@ -4,10 +4,17 @@ import { expect, it } from "vitest";
 import { renderRoute } from "../../test/render";
 it("combines type and text filtering with safety disclaimer", async () => {
   renderRoute("/scans/scan-001/findings");
+<<<<<<< ours
   await screen.findByRole("img", { name: /Finding types/ });
   await userEvent.selectOptions(screen.getByLabelText("Finding type"), "AUTH");
   expect(screen.getByText("GET:/api/profile")).toBeVisible();
   await userEvent.type(screen.getByLabelText("Search findings"), "missing");
+=======
+  await screen.findByRole("img", { name: /Finding 유형/ });
+  await userEvent.selectOptions(screen.getByLabelText("Finding 유형"), "AUTH");
+  expect(screen.getByText("GET:/api/profile")).toBeVisible();
+  await userEvent.type(screen.getByLabelText("Finding 검색"), "missing");
+>>>>>>> theirs
   expect(
     screen.getByText("검색 결과가 없다는 사실은 안전함의 증명이 아닙니다."),
   ).toBeVisible();

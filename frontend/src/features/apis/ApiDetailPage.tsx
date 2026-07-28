@@ -13,11 +13,19 @@ export function ApiDetailPage() {
   return (
     <AppShell>
       <ContentHeader
+<<<<<<< ours
         kicker="API DETAIL"
         title={operation?.path_template ?? "API not found"}
         description={
           operation
             ? `${operation.method} operation contract fields`
+=======
+        kicker="API 상세"
+        title={operation?.path_template ?? "API를 찾을 수 없습니다"}
+        description={
+          operation
+            ? `${operation.method} operation 계약 field`
+>>>>>>> theirs
             : "요청한 operation을 찾을 수 없습니다."
         }
       />
@@ -29,7 +37,11 @@ export function ApiDetailPage() {
         {operation ? (
           <div className="two-col">
             <section className="detail-card">
+<<<<<<< ours
               <h2>Inputs</h2>
+=======
+              <h2>입력</h2>
+>>>>>>> theirs
               {operation.inputs.length ? (
                 operation.inputs.map((input) => (
                   <div
@@ -43,11 +55,19 @@ export function ApiDetailPage() {
                   </div>
                 ))
               ) : (
+<<<<<<< ours
                 <p>No declared inputs</p>
               )}
             </section>
             <section className="detail-card">
               <h2>Outputs</h2>
+=======
+                <p>정의된 입력이 없습니다</p>
+              )}
+            </section>
+            <section className="detail-card">
+              <h2>출력</h2>
+>>>>>>> theirs
               {operation.outputs.map((output) => (
                 <div className="field" key={output.field_path}>
                   <b>{output.field_path}</b>
@@ -58,7 +78,11 @@ export function ApiDetailPage() {
           </div>
         ) : (
           <EmptyState
+<<<<<<< ours
             title="API not found"
+=======
+            title="API를 찾을 수 없습니다"
+>>>>>>> theirs
             description="정규화된 API graph에 없는 operation입니다."
           />
         )}
