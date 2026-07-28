@@ -25,6 +25,12 @@ class ModuleId(StrEnum):
     DATA = "DATA-001"
 
 
+class ExecutableModuleId(StrEnum):
+    BOLA = "BOLA-001"
+    INPUT = "INPUT-001"
+    DATA = "DATA-001"
+
+
 class TargetConfig(StrictModel):
     base_url: str
     allowed_paths: list[str]
@@ -143,11 +149,25 @@ class Operation(StrictModel):
     def normalize_method(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
 
+    @model_validator(mode="after")
+    def require_normalized_identity(self) -> "Operation":
+        expected_operation_id = f"{self.method}:{self.path_template}"
+        if self.operation_id != expected_operation_id:
+            raise ValueError("operation_id must equal METHOD:path_template")
+        return self
+
 
 class NormalizedApiGraph(StrictModel):
     schema_version: Literal["1.1"] = "1.1"
     scan_id: str
     operations: list[Operation]
+
+    @model_validator(mode="after")
+    def require_unique_operation_ids(self) -> "NormalizedApiGraph":
+        operation_ids = [operation.operation_id for operation in self.operations]
+        if len(operation_ids) != len(set(operation_ids)):
+            raise ValueError("operations must have unique operation_id values")
+        return self
 
 
 class Relationship(StrictModel):
@@ -170,7 +190,7 @@ class BindingHint(StrictModel):
 
 class TestCandidate(StrictModel):
     candidate_id: str
-    module_id: str
+    module_id: ExecutableModuleId
     target_operation_id: str
     required_object_types: list[str]
     rationale: str
@@ -215,11 +235,20 @@ class InputBinding(StrictModel):
     object_type: str | None = None
     owner: Literal["user_a", "user_b"] | None = None
 
+    @model_validator(mode="after")
+    def require_binding_type_fields(self) -> "InputBinding":
+        if self.binding_type == "object_binding":
+            if not self.object_type or self.owner is None:
+                raise ValueError("object_binding requires object_type and owner")
+        elif self.object_type is not None or self.owner is not None:
+            raise ValueError("parameter_binding cannot include object_type or owner")
+        return self
+
 
 class ScanStep(StrictModel):
     order: int = Field(gt=0)
     candidate_id: str
-    module_id: str
+    module_id: ExecutableModuleId
     target_operation_id: str
     target_endpoint: TargetEndpoint
     input_bindings: list[InputBinding]
