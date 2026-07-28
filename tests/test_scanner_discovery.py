@@ -16,7 +16,11 @@ from scanner.auth.session_manager import (
 )
 from scanner.contracts import ContractSource, DiscoveryJobRequest, TargetProfile
 from scanner.crawler.katana_runner import KatanaError, KatanaRecord, KatanaRunResult
-from scanner.integration.backend_client import FakeBackendClient, ScannerStage
+from scanner.integration.backend_client import (
+    FakeBackendClient,
+    JobKind,
+    ScannerStage,
+)
 from scanner.policy import CancellationRequested
 from scanner.scanner import (
     OPENAPI_PATH_CANDIDATES,
@@ -170,9 +174,86 @@ class RecordingBackend(FakeBackendClient):
         super().__init__()
         self.published: list[ArtifactEnvelope] = []
 
-    def publish_artifact(self, envelope: ArtifactEnvelope) -> str:
+    def fetch_artifact(
+        self,
+        ref: str,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> bytes:
+        return super().fetch_artifact(
+            ref,
+            job_id=job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def get_requests_used(self, *args: object, **kwargs: object) -> int:
+        raise AssertionError("scanner must not read request count from backend")
+
+    def publish_artifact(
+        self,
+        envelope: ArtifactEnvelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> str:
         self.published.append(envelope)
-        return super().publish_artifact(envelope)
+        return super().publish_artifact(
+            envelope,
+            job_id=job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def report_progress(
+        self,
+        job_id: str,
+        stage: ScannerStage,
+        progress: int,
+        statistics,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
+        super().report_progress(
+            job_id,
+            stage,
+            progress,
+            statistics,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def report_error(
+        self,
+        job_id: str,
+        report,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
+        super().report_error(
+            job_id,
+            report,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def is_cancelled(
+        self,
+        job_id: str,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> bool:
+        return super().is_cancelled(
+            job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
 
 @dataclass
@@ -283,11 +364,17 @@ def test_contract_source_loads_strict_v11_inline_and_artifact_profile() -> None:
         ContractSource(inline=payload),
         TargetProfile,
         backend,
+        job_id=JOB_ID,
+        scan_id=SCAN_ID,
+        job_kind=JobKind.DISCOVERY,
     )
     artifact = load_contract_source(
         ContractSource(artifact_ref="artifact:profile"),
         TargetProfile,
         backend,
+        job_id=JOB_ID,
+        scan_id=SCAN_ID,
+        job_kind=JobKind.DISCOVERY,
     )
 
     assert inline == artifact
@@ -333,7 +420,6 @@ def test_invalid_profile_or_scan_id_reports_fixed_non_retryable_error(
 
 def test_discovery_orchestrates_sources_collection_artifact_and_progress() -> None:
     backend = RecordingBackend()
-    backend.set_requests_used(JOB_ID, 3)
     calls: list[tuple[str, str, str | None]] = []
     katana = FakeKatanaRunner()
     audit = InMemoryAuditSink()
@@ -359,6 +445,10 @@ def test_discovery_orchestrates_sources_collection_artifact_and_progress() -> No
     assert [event.progress for event in backend.progress_events] == sorted(
         event.progress for event in backend.progress_events
     )
+    assert {
+        (event.job_id, event.scan_id, event.job_kind)
+        for event in backend.progress_events
+    } == {(JOB_ID, SCAN_ID, JobKind.DISCOVERY)}
     assert calls[:2] == [
         ("POST", "/api/login", "user-a"),
         ("POST", "/api/login", "user-b"),
@@ -391,12 +481,12 @@ def test_discovery_orchestrates_sources_collection_artifact_and_progress() -> No
         ("GET", "/api/cards/{id}"),
     ]
     assert outcome.available_object_types == ("account",)
-    assert outcome.requests_used == 12
+    assert outcome.requests_used == 9
     assert backend.progress_events[-1].statistics == {
         "actors": 2,
         "operations": 2,
         "object_types": 1,
-        "requests_used": 12,
+        "requests_used": 9,
     }
 
     assert len(backend.published) == 1
@@ -407,6 +497,10 @@ def test_discovery_orchestrates_sources_collection_artifact_and_progress() -> No
     assert artifact.sha256
     assert artifact.size == len(artifact.content)
     assert outcome.graph_artifact_ref == "artifact:1"
+    assert [
+        (event.job_id, event.scan_id, event.job_kind)
+        for event in backend.artifact_events
+    ] == [(JOB_ID, SCAN_ID, JobKind.DISCOVERY)]
     rendered = (
         outcome.graph.model_dump_json()
         + artifact.content.decode()
@@ -442,8 +536,10 @@ def test_cancellation_before_authentication_uses_zero_transport_requests() -> No
         )
 
     assert calls == []
-    assert [event.stage for event in backend.progress_events] == [
-        ScannerStage.CANCELED
+    assert backend.progress_events == []
+    assert backend.error_events == []
+    assert [event.code for event in scanner.audit_events] == [
+        "DISCOVERY_CANCELLED"
     ]
 
 
@@ -472,8 +568,12 @@ def test_cancellation_during_authentication_reports_canceled_not_auth_failure() 
         )
 
     assert len(calls) == 1
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.CANCELED
+        for event in backend.progress_events
+    )
     assert backend.error_reports == []
+    assert scanner.audit_events[-1].code == "DISCOVERY_CANCELLED"
 
 
 def test_cancellation_between_openapi_probes_reports_canceled() -> None:
@@ -509,32 +609,35 @@ def test_cancellation_between_openapi_probes_reports_canceled() -> None:
             )
         )
 
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.CANCELED
+        for event in backend.progress_events
+    )
     assert backend.error_reports == []
+    assert scanner.audit_events[-1].code == "DISCOVERY_CANCELLED"
 
 
-def test_invalid_restored_request_count_fails_before_transport() -> None:
+def test_discovery_does_not_read_backend_request_count() -> None:
     backend = RecordingBackend()
     backend.set_requests_used(JOB_ID, -1)
-    calls: list[httpx.Request] = []
+    calls: list[tuple[str, str, str | None]] = []
     scanner = Scanner(
         backend,
-        transport=httpx.MockTransport(
-            lambda request: calls.append(request) or httpx.Response(200)
-        ),
+        transport=discovery_transport(calls),
         katana_runner=FakeKatanaRunner(),
     )
 
-    with pytest.raises(
-        DiscoveryJobError,
-        match="^discovery request count is invalid$",
-    ):
-        scanner.run_discovery(
-            request_for(ContractSource(inline=profile_payload()))
+    outcome = scanner.run_discovery(
+        request_for(
+            ContractSource(
+                inline=profile_payload(sources=["openapi"])
+            )
         )
+    )
 
-    assert calls == []
-    assert backend.error_reports[-1].code == "DISCOVERY_REQUEST_COUNT_INVALID"
+    assert calls
+    assert outcome.requests_used >= 0
+    assert backend.error_reports == []
 
 
 def test_same_scan_new_job_rejects_retained_count_above_current_profile_cap() -> None:
@@ -635,8 +738,11 @@ def test_same_scan_new_job_budget_checks_current_job_cancellation() -> None:
         )
 
     assert len(calls) - second_job_calls_start == 1
-    assert backend.progress_events[-1].job_id == "job-002"
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.CANCELED
+        for event in backend.progress_events
+    )
+    assert scanner.audit_events[-1].code == "DISCOVERY_CANCELLED"
 
 
 def test_openapi_success_and_katana_failure_completes_with_warning() -> None:
@@ -1745,7 +1851,11 @@ def test_cancellation_from_final_object_response_prevents_graph_publication() ->
         )
 
     assert backend.published == []
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.CANCELED
+        for event in backend.progress_events
+    )
+    assert scanner.audit_events[-1].code == "DISCOVERY_CANCELLED"
     assert all(
         event.stage is not ScannerStage.COMPLETED
         for event in backend.progress_events

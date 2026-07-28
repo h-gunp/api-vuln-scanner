@@ -14,7 +14,11 @@ from scanner.contracts import (
     ExecutionJobRequest,
 )
 from scanner.crawler.katana_runner import KatanaRunResult
-from scanner.integration.backend_client import FakeBackendClient, ScannerStage
+from scanner.integration.backend_client import (
+    FakeBackendClient,
+    JobKind,
+    ScannerStage,
+)
 from scanner.policy import CancellationRequested
 from scanner.scanner import ExecutionJobError, Scanner
 
@@ -165,25 +169,123 @@ class RecordingBackend(FakeBackendClient):
         self.published: list[ArtifactEnvelope] = []
         self.timeline: list[str] = []
 
-    def report_approval(self, job_id, decision) -> None:
-        self.timeline.append(f"approval:{job_id}")
-        super().report_approval(job_id, decision)
+    def fetch_artifact(
+        self,
+        ref: str,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> bytes:
+        return super().fetch_artifact(
+            ref,
+            job_id=job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
-    def publish_artifact(self, envelope: ArtifactEnvelope) -> str:
+    def get_requests_used(self, *args: object, **kwargs: object) -> int:
+        raise AssertionError("scanner must not read request count from backend")
+
+    def report_approval(
+        self,
+        job_id,
+        decision,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
+        self.timeline.append(f"approval:{job_id}")
+        super().report_approval(
+            job_id,
+            decision,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def publish_artifact(
+        self,
+        envelope: ArtifactEnvelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> str:
         self.published.append(envelope)
         self.timeline.append(f"artifact:{envelope.artifact_type}")
-        return super().publish_artifact(envelope)
+        return super().publish_artifact(
+            envelope,
+            job_id=job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
-    def report_progress(self, job_id, stage, progress, statistics) -> None:
+    def report_progress(
+        self,
+        job_id,
+        stage,
+        progress,
+        statistics,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
         self.timeline.append(f"progress:{job_id}:{stage.value}")
-        super().report_progress(job_id, stage, progress, statistics)
+        super().report_progress(
+            job_id,
+            stage,
+            progress,
+            statistics,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def report_error(
+        self,
+        job_id,
+        report,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
+        super().report_error(
+            job_id,
+            report,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def is_cancelled(
+        self,
+        job_id: str,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> bool:
+        return super().is_cancelled(
+            job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
 
 class ResultFailingBackend(RecordingBackend):
-    def publish_artifact(self, envelope: ArtifactEnvelope) -> str:
+    def publish_artifact(
+        self,
+        envelope: ArtifactEnvelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> str:
         if envelope.artifact_type == "scan_result":
             raise RuntimeError("raw backend result failure")
-        return super().publish_artifact(envelope)
+        return super().publish_artifact(
+            envelope,
+            job_id=job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
 
 class CancelOnProgressBackend(RecordingBackend):
@@ -191,8 +293,24 @@ class CancelOnProgressBackend(RecordingBackend):
         super().__init__()
         self.cancel_stage: ScannerStage | None = None
 
-    def report_progress(self, job_id, stage, progress, statistics) -> None:
-        super().report_progress(job_id, stage, progress, statistics)
+    def report_progress(
+        self,
+        job_id,
+        stage,
+        progress,
+        statistics,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
+        super().report_progress(
+            job_id,
+            stage,
+            progress,
+            statistics,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
         if job_id == EXECUTION_JOB_ID and stage is self.cancel_stage:
             self.cancel(job_id)
 
@@ -323,15 +441,52 @@ def test_execution_loads_inline_or_artifact_graph_analysis_and_plan_and_reuses_r
     assert outcome.result_artifact_ref
     assert len(calls) == calls_before_execution
     assert [event.job_id for event in backend.approval_events] == [EXECUTION_JOB_ID]
+    assert [
+        (event.scan_id, event.job_kind)
+        for event in backend.approval_events
+    ] == [(SCAN_ID, JobKind.EXECUTION)]
+    assert all(
+        event.scan_id == SCAN_ID
+        and event.job_kind in {JobKind.DISCOVERY, JobKind.EXECUTION}
+        for event in backend.progress_events
+    )
+    assert all(
+        event.scan_id == SCAN_ID
+        and event.job_kind in {JobKind.DISCOVERY, JobKind.EXECUTION}
+        for event in backend.artifact_events
+    )
     assert backend.timeline.index(f"approval:{EXECUTION_JOB_ID}") < backend.timeline.index(
         "artifact:scan_result"
     )
     assert backend.progress_events[-1].stage is ScannerStage.COMPLETED
 
 
+def test_pending_approval_plan_is_evaluated_without_mutating_plan_status() -> None:
+    backend = RecordingBackend()
+    calls: list[httpx.Request] = []
+    scanner, graph, requests_used = discover(backend, calls)
+    plan = empty_plan_payload(requests_used)
+    original_plan = json.loads(json.dumps(plan))
+
+    outcome = scanner.run_execution(
+        execution_request(
+            ContractSource(inline=graph),
+            ContractSource(inline=empty_analysis_payload()),
+            ContractSource(inline=plan),
+        )
+    )
+
+    assert outcome.decision.status is ApprovalStatus.APPROVED
+    assert plan == original_plan
+    assert plan["status"] == "PENDING_APPROVAL"
+    assert [
+        (event.job_id, event.scan_id, event.job_kind)
+        for event in backend.approval_events
+    ] == [(EXECUTION_JOB_ID, SCAN_ID, JobKind.EXECUTION)]
+
+
 def test_missing_runtime_restores_count_then_reauthenticates_and_rejects_stale_plan() -> None:
     backend = RecordingBackend()
-    backend.set_requests_used(EXECUTION_JOB_ID, 4)
     calls: list[httpx.Request] = []
     scanner = Scanner(
         backend,
@@ -359,7 +514,6 @@ def test_missing_runtime_restores_count_then_reauthenticates_and_rejects_stale_p
 
 def test_missing_runtime_rehydrates_actor_objects_from_loaded_graph_before_approval() -> None:
     backend = RecordingBackend()
-    backend.set_requests_used(EXECUTION_JOB_ID, 4)
     calls: list[httpx.Request] = []
     scanner = Scanner(
         backend,
@@ -504,7 +658,9 @@ def test_cancellation_before_approval_sends_no_transport_or_result() -> None:
     assert calls == []
     assert backend.approval_events == []
     assert backend.published == []
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert backend.progress_events == []
+    assert backend.error_events == []
+    assert scanner.audit_events[-1].code == "EXECUTION_CANCELLED"
 
 
 def test_policy_progress_callback_cancellation_prevents_approval_side_effect() -> None:
@@ -528,7 +684,11 @@ def test_policy_progress_callback_cancellation_prevents_approval_side_effect() -
     assert not any(
         item.artifact_type == "scan_result" for item in backend.published
     )
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.CANCELED
+        for event in backend.progress_events
+    )
+    assert scanner.audit_events[-1].code == "EXECUTION_CANCELLED"
 
 
 def test_verifying_progress_callback_cancellation_prevents_result_publication() -> None:
@@ -550,7 +710,11 @@ def test_verifying_progress_callback_cancellation_prevents_result_publication() 
     assert not any(
         item.artifact_type == "scan_result" for item in backend.published
     )
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.CANCELED
+        for event in backend.progress_events
+    )
+    assert scanner.audit_events[-1].code == "EXECUTION_CANCELLED"
 
 
 def test_cancellation_between_modules_publishes_no_result_or_later_request() -> None:
@@ -582,7 +746,11 @@ def test_cancellation_between_modules_publishes_no_result_or_later_request() -> 
         "/api/profile"
     ]
     assert not any(item.artifact_type == "scan_result" for item in backend.published)
-    assert backend.progress_events[-1].stage is ScannerStage.CANCELED
+    assert all(
+        event.stage is not ScannerStage.CANCELED
+        for event in backend.progress_events
+    )
+    assert scanner.audit_events[-1].code == "EXECUTION_CANCELLED"
 
 
 def test_result_artifact_failure_fails_job_without_exposing_backend_error() -> None:

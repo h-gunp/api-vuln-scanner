@@ -34,6 +34,7 @@ from scanner.contracts import (
 from scanner.http_client import SafeHttpClient, ScannerRequestError
 from scanner.integration.backend_client import (
     BackendClient,
+    JobKind,
     ScannerErrorReport,
     ScannerStage,
 )
@@ -234,7 +235,12 @@ class Executor:
             ),
             reason_codes=reason_codes,
         )
-        self._backend.report_approval(job_id, decision)
+        self._backend.report_approval(
+            job_id,
+            decision,
+            scan_id=profile.scan_id,
+            job_kind=JobKind.EXECUTION,
+        )
         return decision
 
     def execute(
@@ -273,6 +279,7 @@ class Executor:
             self._report_failure(
                 job_id,
                 safe_scan_id,
+                backend_scan_id=profile.scan_id,
                 code="EXECUTION_STEP_INVALID",
                 stage=ScannerStage.EXECUTING,
                 retryable=False,
@@ -313,18 +320,21 @@ class Executor:
             candidate.candidate_id: candidate
             for candidate in analysis.test_candidates
         }
-        cancellation = CancellationGuard(self._backend)
+        cancellation = CancellationGuard(
+            self._backend,
+            scan_id=profile.scan_id,
+            job_kind=JobKind.EXECUTION,
+        )
         findings: dict[str, Finding] = {}
         for step in plan.steps:
             try:
                 cancellation.raise_if_cancelled(job_id)
             except CancellationRequested:
-                self._report_failure(
-                    job_id,
-                    safe_scan_id,
+                self._emit(
                     code="EXECUTION_CANCELLED",
-                    stage=ScannerStage.CANCELED,
-                    retryable=False,
+                    level="INFO",
+                    job_id=job_id,
+                    scan_id=safe_scan_id,
                     operation_id=None,
                     module_id=(
                         step.module_id
@@ -332,7 +342,7 @@ class Executor:
                         else None
                     ),
                 )
-                break
+                raise
 
             if step.module_id not in REQUEST_ESTIMATES:
                 self._report_failure(
@@ -407,16 +417,15 @@ class Executor:
                 )
                 self._client.ensure_capacity(REQUEST_ESTIMATES[step.module_id])
             except CancellationRequested:
-                self._report_failure(
-                    job_id,
-                    safe_scan_id,
+                self._emit(
                     code="EXECUTION_CANCELLED",
-                    stage=ScannerStage.CANCELED,
-                    retryable=False,
+                    level="INFO",
+                    job_id=job_id,
+                    scan_id=safe_scan_id,
                     operation_id=operation.operation_id,
                     module_id=step.module_id,
                 )
-                break
+                raise
             except BudgetExceeded:
                 self._report_failure(
                     job_id,
@@ -451,16 +460,15 @@ class Executor:
             try:
                 outcome = run(context)
             except CancellationRequested:
-                self._report_failure(
-                    job_id,
-                    safe_scan_id,
+                self._emit(
                     code="EXECUTION_CANCELLED",
-                    stage=ScannerStage.CANCELED,
-                    retryable=False,
+                    level="INFO",
+                    job_id=job_id,
+                    scan_id=safe_scan_id,
                     operation_id=operation.operation_id,
                     module_id=step.module_id,
                 )
-                break
+                raise
             except BudgetExceeded:
                 self._report_failure(
                     job_id,
@@ -679,7 +687,12 @@ class Executor:
                 payload=evidence_payload.model_dump(mode="json"),
                 sensitive_values=sensitive_values,
             )
-            evidence_ref = self._backend.publish_artifact(envelope)
+            evidence_ref = self._backend.publish_artifact(
+                envelope,
+                job_id=job_id,
+                scan_id=scan_id,
+                job_kind=JobKind.EXECUTION,
+            )
             if (
                 not isinstance(evidence_ref, str)
                 or _OPAQUE_EVIDENCE_REFERENCE.fullmatch(evidence_ref) is None
@@ -723,6 +736,7 @@ class Executor:
         job_id: str,
         scan_id: str,
         *,
+        backend_scan_id: str | None = None,
         code: str,
         stage: ScannerStage,
         retryable: bool,
@@ -736,6 +750,8 @@ class Executor:
                 stage=stage,
                 retryable=retryable,
             ),
+            scan_id=backend_scan_id or scan_id,
+            job_kind=JobKind.EXECUTION,
         )
         self._emit(
             code=code,

@@ -28,7 +28,7 @@ from scanner.contracts import (
     TestCandidate as CandidateContract,
 )
 from scanner.executor import Executor, module_for_policy, policy_for_module
-from scanner.integration.backend_client import FakeBackendClient
+from scanner.integration.backend_client import FakeBackendClient, JobKind
 from scanner.modules.auth import DisabledAuthModule, ModuleNotApproved
 
 
@@ -311,6 +311,10 @@ def _evaluate(
         plan=documents.plan,
         runtime_requests_used=runtime_requests_used,
     )
+    assert [
+        (event.job_id, event.scan_id, event.job_kind)
+        for event in backend.approval_events
+    ] == [("job-001", "scan-001", JobKind.EXECUTION)]
     return decision, backend, modules
 
 

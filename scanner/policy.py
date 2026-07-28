@@ -10,7 +10,7 @@ from typing import Callable
 from urllib.parse import SplitResult, urlsplit
 
 from scanner.contracts import PolicyModule, TargetProfile
-from scanner.integration.backend_client import BackendClient
+from scanner.integration.backend_client import BackendClient, JobKind
 
 
 class PolicyViolation(Exception):
@@ -26,11 +26,23 @@ class CancellationRequested(Exception):
 
 
 class CancellationGuard:
-    def __init__(self, backend: BackendClient) -> None:
+    def __init__(
+        self,
+        backend: BackendClient,
+        *,
+        scan_id: str | None = None,
+        job_kind: JobKind | None = None,
+    ) -> None:
         self._backend = backend
+        self._scan_id = scan_id
+        self._job_kind = job_kind
 
     def raise_if_cancelled(self, job_id: str) -> None:
-        if self._backend.is_cancelled(job_id):
+        if self._backend.is_cancelled(
+            job_id,
+            scan_id=self._scan_id,
+            job_kind=self._job_kind,
+        ):
             raise CancellationRequested("scan cancelled")
 
 

@@ -46,6 +46,7 @@ from scanner.http_client import ResponseSnapshot, SafeHttpClient, ScannerRequest
 from scanner.executor import Executor
 from scanner.integration.backend_client import (
     BackendClient,
+    JobKind,
     ScannerErrorReport,
     ScannerStage,
 )
@@ -115,6 +116,10 @@ def load_contract_source(
     source: ContractSource,
     model_type: type[ContractModel],
     backend_client: BackendClient,
+    *,
+    job_id: str,
+    scan_id: str,
+    job_kind: JobKind,
 ) -> ContractModel:
     """Load and strictly validate an inline or artifact-backed contract."""
 
@@ -122,7 +127,12 @@ def load_contract_source(
         payload: object = source.inline
     else:
         try:
-            content = backend_client.fetch_artifact(cast(str, source.artifact_ref))
+            content = backend_client.fetch_artifact(
+                cast(str, source.artifact_ref),
+                job_id=job_id,
+                scan_id=scan_id,
+                job_kind=job_kind,
+            )
         except Exception:
             raise ContractArtifactFetchError("contract artifact fetch failed") from None
         try:
@@ -226,7 +236,11 @@ class Scanner:
         self,
         request: DiscoveryJobRequest,
     ) -> DiscoveryOutcome:
-        cancellation = CancellationGuard(self._backend)
+        cancellation = CancellationGuard(
+            self._backend,
+            scan_id=request.scan_id,
+            job_kind=JobKind.DISCOVERY,
+        )
         self._check_cancellation(request, cancellation)
         self._progress(request, ScannerStage.PROFILE_LOADING, {})
 
@@ -363,7 +377,12 @@ class Scanner:
             )
         self._check_cancellation(request, cancellation)
         try:
-            graph_artifact_ref = self._backend.publish_artifact(envelope)
+            graph_artifact_ref = self._backend.publish_artifact(
+                envelope,
+                job_id=request.job_id,
+                scan_id=request.scan_id,
+                job_kind=JobKind.DISCOVERY,
+            )
         except Exception:
             self._fail(
                 request,
@@ -394,7 +413,11 @@ class Scanner:
         self,
         request: ExecutionJobRequest,
     ) -> ExecutionOutcome:
-        cancellation = CancellationGuard(self._backend)
+        cancellation = CancellationGuard(
+            self._backend,
+            scan_id=request.scan_id,
+            job_kind=JobKind.EXECUTION,
+        )
         self._check_cancellation(request, cancellation)
         self._progress(request, ScannerStage.PROFILE_LOADING, {})
         self._check_cancellation(request, cancellation)
@@ -446,6 +469,7 @@ class Scanner:
         state, budget = self._execution_state_for(
             request,
             profile,
+            plan,
             cancellation,
         )
         policy = PolicyEnforcer(profile)
@@ -587,7 +611,12 @@ class Scanner:
                 schema_version="1.2",
                 payload=result.model_dump(mode="json"),
             )
-            result_artifact_ref = self._backend.publish_artifact(envelope)
+            result_artifact_ref = self._backend.publish_artifact(
+                envelope,
+                job_id=request.job_id,
+                scan_id=request.scan_id,
+                job_kind=JobKind.EXECUTION,
+            )
             if (
                 not isinstance(result_artifact_ref, str)
                 or _OPAQUE_ARTIFACT_REFERENCE.fullmatch(result_artifact_ref) is None
@@ -632,7 +661,14 @@ class Scanner:
         invalid_error_code: str,
     ) -> ContractModel:
         try:
-            return load_contract_source(source, model_type, self._backend)
+            return load_contract_source(
+                source,
+                model_type,
+                self._backend,
+                job_id=request.job_id,
+                scan_id=request.scan_id,
+                job_kind=JobKind.EXECUTION,
+            )
         except ContractArtifactFetchError:
             self._execution_fail(
                 request,
@@ -654,6 +690,7 @@ class Scanner:
         self,
         request: ExecutionJobRequest,
         profile: TargetProfile,
+        plan: ScanPlan,
         cancellation: CancellationGuard,
     ) -> tuple[_ScanState, RequestBudget]:
         state = self._scan_states.get(request.scan_id)
@@ -672,14 +709,14 @@ class Scanner:
                 message="execution runtime is invalid",
             )
         try:
-            restored = self._backend.get_requests_used(request.job_id)
+            restored_from_plan = plan.budget.requests_already_used
             if (
-                isinstance(restored, bool)
-                or not isinstance(restored, int)
-                or restored < 0
+                isinstance(restored_from_plan, bool)
+                or not isinstance(restored_from_plan, int)
+                or restored_from_plan < 0
             ):
                 raise ValueError("invalid restored request count")
-            restored = max(state.requests_used, restored)
+            restored = max(state.requests_used, restored_from_plan)
             if restored > profile.safety_policy.max_requests:
                 raise ValueError("invalid restored request count")
             budget = _TrackedRequestBudget(
@@ -706,6 +743,9 @@ class Scanner:
                 request.target_profile,
                 TargetProfile,
                 self._backend,
+                job_id=request.job_id,
+                scan_id=request.scan_id,
+                job_kind=JobKind.DISCOVERY,
             )
         except ContractArtifactFetchError:
             self._fail(
@@ -745,14 +785,7 @@ class Scanner:
             self._scan_states[request.scan_id] = state
         profile_fingerprint = _target_profile_fingerprint(profile)
         try:
-            restored = self._backend.get_requests_used(request.job_id)
-            if (
-                isinstance(restored, bool)
-                or not isinstance(restored, int)
-                or restored < 0
-            ):
-                raise ValueError("invalid restored request count")
-            restored = max(state.requests_used, restored)
+            restored = state.requests_used
             if restored > profile.safety_policy.max_requests:
                 raise ValueError("invalid restored request count")
             budget = _TrackedRequestBudget(
@@ -1300,19 +1333,28 @@ class Scanner:
         stage: ScannerStage,
         statistics: Mapping[str, int],
     ) -> None:
+        job_kind = self._job_kind(request)
         self._backend.report_progress(
             request.job_id,
             stage,
             _PROGRESS[stage],
             statistics,
+            scan_id=request.scan_id,
+            job_kind=job_kind,
         )
 
     def _cancelled(self, request: JobRequest) -> None:
-        self._backend.report_progress(
-            request.job_id,
-            ScannerStage.CANCELED,
-            100,
-            {},
+        job_kind = self._job_kind(request)
+        self._audit_sink.emit(
+            AuditEvent(
+                code=f"{job_kind.value}_CANCELLED",
+                level="INFO",
+                job_id=request.job_id,
+                scan_id=request.scan_id,
+                operation_id=None,
+                module_id=None,
+                details={},
+            )
         )
 
     def _check_cancellation(
@@ -1325,6 +1367,12 @@ class Scanner:
         except CancellationRequested:
             self._cancelled(request)
             raise
+
+    @staticmethod
+    def _job_kind(request: JobRequest) -> JobKind:
+        if isinstance(request, DiscoveryJobRequest):
+            return JobKind.DISCOVERY
+        return JobKind.EXECUTION
 
     def _warning(
         self,
@@ -1361,6 +1409,8 @@ class Scanner:
                 stage=stage,
                 retryable=retryable,
             ),
+            scan_id=request.scan_id,
+            job_kind=JobKind.DISCOVERY,
         )
         raise DiscoveryJobError(message) from None
 
@@ -1380,6 +1430,8 @@ class Scanner:
                 stage=stage,
                 retryable=retryable,
             ),
+            scan_id=request.scan_id,
+            job_kind=JobKind.EXECUTION,
         )
         raise ExecutionJobError(message) from None
 

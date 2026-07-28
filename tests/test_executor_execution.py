@@ -22,11 +22,16 @@ from scanner.contracts import (
 )
 from scanner.executor import Executor
 from scanner.http_client import SafeHttpClient
-from scanner.integration.backend_client import FakeBackendClient
+from scanner.integration.backend_client import FakeBackendClient, JobKind
 from scanner.modules.base import ModuleOutcome, ModuleVerdict
 from scanner.modules.data_exposure import DataExposureModule
 from scanner.modules.input_validation import InputValidationModule
-from scanner.policy import CancellationGuard, PolicyEnforcer, RequestBudget
+from scanner.policy import (
+    CancellationGuard,
+    CancellationRequested,
+    PolicyEnforcer,
+    RequestBudget,
+)
 
 
 @dataclass(frozen=True)
@@ -79,12 +84,26 @@ class SequenceModule:
 
 
 class FailingArtifactBackend(FakeBackendClient):
-    def publish_artifact(self, envelope):
+    def publish_artifact(
+        self,
+        envelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ):
         raise RuntimeError("raw-backend-secret")
 
 
 class SecretReferenceBackend(FakeBackendClient):
-    def publish_artifact(self, envelope):
+    def publish_artifact(
+        self,
+        envelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ):
         return "runtime-token-a"
 
 
@@ -93,7 +112,14 @@ class FixedReferenceBackend(FakeBackendClient):
         super().__init__()
         self._reference = reference
 
-    def publish_artifact(self, envelope):
+    def publish_artifact(
+        self,
+        envelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ):
         return self._reference
 
 
@@ -374,9 +400,10 @@ def _execution_dependencies(
     *,
     backend: FakeBackendClient | None = None,
     restored_requests: int | None = None,
+    audit: InMemoryAuditSink | None = None,
 ):
     backend = backend or FakeBackendClient()
-    audit = InMemoryAuditSink()
+    audit = audit or InMemoryAuditSink()
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -386,7 +413,11 @@ def _execution_dependencies(
     budget = RequestBudget(
         max_requests=documents.profile.safety_policy.max_requests,
         requests_per_second=1000,
-        cancellation_guard=CancellationGuard(backend),
+        cancellation_guard=CancellationGuard(
+            backend,
+            scan_id="scan-001",
+            job_kind=JobKind.EXECUTION,
+        ),
         job_id="job-001",
     )
     budget.restore(
@@ -412,11 +443,13 @@ def _execute(
     decision: PlanApprovalDecision | None = None,
     client: SafeHttpClient | None | object = ...,
     runtime: RuntimeContext | None = None,
+    audit: InMemoryAuditSink | None = None,
 ) -> tuple[ScanResult, FakeBackendClient, InMemoryAuditSink, RequestBudget, list]:
     backend, audit, budget, resolved_client, calls = _execution_dependencies(
         documents,
         backend=backend,
         restored_requests=restored_requests,
+        audit=audit,
     )
     if client is ...:
         client = resolved_client
@@ -435,6 +468,16 @@ def _execute(
         plan=documents.plan,
         runtime=runtime or _runtime(),
         decision=decision or _decision(),
+    )
+    assert all(
+        event.job_id == "job-001"
+        and event.scan_id == documents.profile.scan_id
+        and event.job_kind is JobKind.EXECUTION
+        for event in (
+            backend.artifact_events
+            + backend.error_events
+            + backend.approval_events
+        )
     )
     return result, backend, audit, budget, calls
 
@@ -492,6 +535,7 @@ def test_rejected_decision_performs_zero_module_and_transport_requests() -> None
 def test_cancellation_between_steps_stops_all_remaining_requests() -> None:
     documents = _documents()
     backend = FakeBackendClient()
+    audit = InMemoryAuditSink()
     modules = {
         "BOLA-001": FixedOutcomeModule(
             _not_found("VERIFY-BOLA-001"),
@@ -508,19 +552,19 @@ def test_cancellation_between_steps_stops_all_remaining_requests() -> None:
         ),
     }
 
-    result, backend, _, budget, transport_calls = _execute(
-        documents,
-        backend=backend,
-        modules=modules,
-    )
+    with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+        _execute(
+            documents,
+            backend=backend,
+            modules=modules,
+            audit=audit,
+        )
 
-    assert result.findings == []
     assert len(modules["BOLA-001"].calls) == 1
     assert modules["INPUT-001"].calls == []
     assert modules["DATA-001"].calls == []
-    assert len(transport_calls) == 2
-    assert budget.requests_used == 5
-    assert backend.error_reports[-1].code == "EXECUTION_CANCELLED"
+    assert backend.error_reports == []
+    assert any(event.code == "EXECUTION_CANCELLED" for event in audit.events)
 
 
 def test_capacity_exhaustion_before_step_stops_remaining_modules_without_request() -> None:
@@ -1165,17 +1209,20 @@ def test_cancellation_does_not_copy_unvalidated_step_identifier_to_audit() -> No
     documents.plan.steps[0].target_operation_id = "runtime-token-a"
     backend = FakeBackendClient()
     backend.cancel("job-001")
+    audit = InMemoryAuditSink()
     module = FixedOutcomeModule(_verified())
 
-    result, backend, audit, _, _ = _execute(
-        documents,
-        backend=backend,
-        modules={"DATA-001": module},
-    )
+    with pytest.raises(CancellationRequested, match="^scan cancelled$"):
+        _execute(
+            documents,
+            backend=backend,
+            modules={"DATA-001": module},
+            audit=audit,
+        )
 
-    assert result.findings == []
     assert module.calls == []
     assert "runtime-token-a" not in repr((backend.error_reports, audit.events))
+    assert audit.events[-1].code == "EXECUTION_CANCELLED"
 
 
 def test_malformed_verified_module_outcome_becomes_secret_free_module_failure() -> None:

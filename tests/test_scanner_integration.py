@@ -15,7 +15,11 @@ from scanner.contracts import (
     VulnerabilityType,
 )
 from scanner.crawler.katana_runner import KatanaRunResult
-from scanner.integration.backend_client import FakeBackendClient, ScannerStage
+from scanner.integration.backend_client import (
+    FakeBackendClient,
+    JobKind,
+    ScannerStage,
+)
 from scanner.scanner import ExecutionJobError, Scanner
 
 
@@ -330,18 +334,89 @@ class RecordingBackend(FakeBackendClient):
         self.published: list[ArtifactEnvelope] = []
         self.timeline: list[str] = []
 
-    def publish_artifact(self, envelope: ArtifactEnvelope) -> str:
+    def get_requests_used(self, *args: object, **kwargs: object) -> int:
+        raise AssertionError("scanner must not read request count from backend")
+
+    def publish_artifact(
+        self,
+        envelope: ArtifactEnvelope,
+        *,
+        job_id: str,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> str:
         self.published.append(envelope)
         self.timeline.append(f"artifact:{envelope.artifact_type}")
-        return super().publish_artifact(envelope)
+        return super().publish_artifact(
+            envelope,
+            job_id=job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
-    def report_approval(self, job_id, decision) -> None:
+    def report_approval(
+        self,
+        job_id,
+        decision,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
         self.timeline.append("approval")
-        super().report_approval(job_id, decision)
+        super().report_approval(
+            job_id,
+            decision,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
-    def report_progress(self, job_id, stage, progress, statistics) -> None:
+    def report_progress(
+        self,
+        job_id,
+        stage,
+        progress,
+        statistics,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
         self.timeline.append(f"progress:{job_id}:{stage.value}")
-        super().report_progress(job_id, stage, progress, statistics)
+        super().report_progress(
+            job_id,
+            stage,
+            progress,
+            statistics,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def report_error(
+        self,
+        job_id,
+        report,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> None:
+        super().report_error(
+            job_id,
+            report,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
+
+    def is_cancelled(
+        self,
+        job_id: str,
+        *,
+        scan_id: str,
+        job_kind: JobKind,
+    ) -> bool:
+        return super().is_cancelled(
+            job_id,
+            scan_id=scan_id,
+            job_kind=job_kind,
+        )
 
 
 class LocalBankTransport:
@@ -528,6 +603,24 @@ def test_complete_local_discovery_and_execution_flow_is_fixed_rule_safe_and_secr
         ScannerStage.VERIFYING,
         ScannerStage.COMPLETED,
     ]
+    assert {
+        (event.job_id, event.scan_id, event.job_kind)
+        for event in backend.progress_events
+    } == {
+        (DISCOVERY_JOB_ID, SCAN_ID, JobKind.DISCOVERY),
+        (EXECUTION_JOB_ID, SCAN_ID, JobKind.EXECUTION),
+    }
+    assert [
+        (event.job_id, event.scan_id, event.job_kind)
+        for event in backend.approval_events
+    ] == [(EXECUTION_JOB_ID, SCAN_ID, JobKind.EXECUTION)]
+    assert {
+        (event.job_id, event.scan_id, event.job_kind)
+        for event in backend.artifact_events
+    } == {
+        (DISCOVERY_JOB_ID, SCAN_ID, JobKind.DISCOVERY),
+        (EXECUTION_JOB_ID, SCAN_ID, JobKind.EXECUTION),
+    }
     assert backend.timeline.index("approval") < backend.timeline.index(
         "artifact:scan_result"
     )
