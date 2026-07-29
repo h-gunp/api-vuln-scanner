@@ -59,3 +59,20 @@ class ArtifactRepository:
             .limit(1)
         )
         return await self.session.scalar(statement)
+
+    async def existing_ids_for_scan(
+        self,
+        scan_id: uuid.UUID,
+        artifact_type: ArtifactType,
+        artifact_ids: set[uuid.UUID],
+    ) -> set[uuid.UUID]:
+        if not artifact_ids:
+            return set()
+        result = await self.session.scalars(
+            select(ScanArtifact.id).where(
+                ScanArtifact.scan_id == scan_id,
+                ScanArtifact.artifact_type == artifact_type,
+                ScanArtifact.id.in_(artifact_ids),
+            )
+        )
+        return set(result)

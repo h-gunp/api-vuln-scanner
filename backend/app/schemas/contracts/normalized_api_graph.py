@@ -3,29 +3,29 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from app.schemas.common import APIModel
+from app.schemas.common import ArtifactModel
 
 OPERATION_ID_PATTERN = re.compile(r"^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD):(/.*)$")
 ValueType = Literal["string", "integer", "number", "boolean", "object", "array", "unknown"]
 
 
-class OperationInput(APIModel):
+class OperationInput(ArtifactModel):
     location: Literal["path", "query", "header", "body"]
     field_path: str
     type: ValueType
 
 
-class OperationOutput(APIModel):
+class OperationOutput(ArtifactModel):
     field_path: str
     type: ValueType
 
 
-class NormalizedOperation(APIModel):
+class NormalizedOperation(ArtifactModel):
     operation_id: str
     method: str
     path_template: str
-    inputs: list[OperationInput] = Field(default_factory=list)
-    outputs: list[OperationOutput] = Field(default_factory=list)
+    inputs: list[OperationInput]
+    outputs: list[OperationOutput]
 
     @model_validator(mode="after")
     def validate_operation_id(self) -> "NormalizedOperation":
@@ -40,10 +40,10 @@ class NormalizedOperation(APIModel):
         return self
 
 
-class NormalizedAPIGraph(APIModel):
+class NormalizedAPIGraph(ArtifactModel):
     schema_version: Literal["1.1"] = "1.1"
     scan_id: str
-    operations: list[NormalizedOperation] = Field(default_factory=list)
+    operations: list[NormalizedOperation]
 
     @model_validator(mode="after")
     def operation_ids_are_unique(self) -> "NormalizedAPIGraph":

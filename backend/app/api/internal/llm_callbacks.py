@@ -7,10 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.internal.auth import InternalAuth
 from app.core.config import Settings, get_settings
 from app.core.database import get_db_session
-from app.integrations.executor.http_client import HTTPExecutorClient
-from app.integrations.executor.mock_client import MockExecutorClient
 from app.integrations.llm.http_client import HTTPLLMClient
 from app.integrations.llm.mock_client import MockLLMClient
+from app.integrations.scanner.http_client import HTTPScannerClient
+from app.integrations.scanner.mock_client import MockScannerClient
 from app.repositories.artifact_repository import ArtifactRepository
 from app.repositories.external_job_repository import ExternalJobRepository
 from app.repositories.finding_repository import FindingRepository
@@ -42,15 +42,23 @@ def get_llm_callback_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> LLMCallbackService:
-    executor = (
-        MockExecutorClient()
+    scanner = (
+        MockScannerClient()
         if settings.use_mock_integrations
-        else HTTPExecutorClient(settings.executor_base_url)
+        else HTTPScannerClient(
+            settings.scanner_base_url,
+            service_token=settings.internal_service_token,
+            timeout_seconds=settings.integration_timeout_seconds,
+        )
     )
     llm = (
         MockLLMClient()
         if settings.use_mock_integrations
-        else HTTPLLMClient(settings.llm_base_url)
+        else HTTPLLMClient(
+            settings.llm_base_url,
+            service_token=settings.internal_service_token,
+            timeout_seconds=settings.integration_timeout_seconds,
+        )
     )
     return LLMCallbackService(
         ScanRepository(session),
@@ -60,7 +68,7 @@ def get_llm_callback_service(
         ArtifactValidationService(),
         PlanValidationService(),
         ProgressService(),
-        executor,
+        scanner,
         llm,
     )
 

@@ -7,6 +7,16 @@ class APIModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, use_enum_values=False)
 
 
+class ArtifactModel(APIModel):
+    """Strict base for immutable cross-service JSON artifacts."""
+
+    model_config = ConfigDict(
+        from_attributes=True,
+        use_enum_values=False,
+        extra="forbid",
+    )
+
+
 class FieldError(APIModel):
     field: str
     reason: str

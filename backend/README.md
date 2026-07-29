@@ -1,6 +1,6 @@
 # API Vulnerability Scanner Backend
 
-FastAPI 기반 보안 스캔 오케스트레이터다. 프론트엔드의 스캔 요청을 받고 Scanner, LLM, Module Executor/Verifier 사이의 작업 상태와 버전이 지정된 JSON 산출물을 검증·저장한다. 크롤링, LLM 추론, 공격 요청, 취약점 판정 자체는 이 백엔드의 책임이 아니다.
+FastAPI 기반 보안 스캔 오케스트레이터다. 프론트엔드의 스캔 요청을 받고 Scanner와 LLM 사이의 작업 상태와 버전이 지정된 JSON 산출물을 검증·저장한다. Scanner가 discovery와 module execution/verification을 모두 소유한다.
 
 ## 데이터 흐름
 
@@ -9,7 +9,7 @@ Frontend
   → Backend (target_profile.json)
   → Scanner (normalized_api_graph.json)
   → Backend → LLM (relationship_analysis.json, scan_plan.json)
-  → Backend → Executor/Verifier (scan_result.json)
+  → Backend → Scanner Executor/Verifier (scan_result.json)
   → Backend → LLM (ai_report.json)
   → Backend → Frontend (상태, Finding, AI/PDF 보고서)
 ```
@@ -20,7 +20,7 @@ Frontend
 
 ```text
 API Router → Service → Repository → PostgreSQL
-                  ├→ Scanner / LLM / Executor Client
+                  ├→ Scanner / LLM Client
                   └→ Artifact Service → Local/Object Storage
 ```
 
@@ -36,7 +36,7 @@ app/
 ├── schemas/contracts/   # 버전별 JSON 계약
 ├── repositories/        # DB 접근
 ├── services/            # 오케스트레이션과 검증
-├── integrations/        # Scanner/LLM/Executor 인터페이스
+├── integrations/        # Scanner/LLM 인터페이스와 실제 HTTP client
 ├── storage/             # 로컬/Object Storage 인터페이스
 ├── tasks/               # Background/ARQ 작업 경계
 └── utils/
@@ -74,7 +74,7 @@ cd backend
 docker compose up --build
 ```
 
-Backend 시작 전에 `alembic upgrade head`가 실행된다. Compose는 `backend`, `postgres`, `redis` 서비스를 포함한다. 개발 기본값 `USE_MOCK_INTEGRATIONS=true`는 외부 작업 ID만 발급하며, 결과는 internal callback API로 전달한다.
+Backend 시작 전에 `alembic upgrade head`가 실행된다. Compose는 `backend`, `scanner`, `llm`, `postgres`, `redis` 서비스를 포함하며 실제 HTTP 연동이 기본값이다. 공개 Backend 포트는 `8000`, Scanner는 `8001`, LLM은 `8002`다. Vite 개발 origin `http://127.0.0.1:4173`과 `http://localhost:4173`만 credential CORS allowlist에 포함된다.
 
 ## Alembic
 
@@ -154,7 +154,7 @@ artifacts/scans/{scan_id}/
 - AI 보고서의 Finding별 분석을 목록 `summary`로 매핑하는 최종 규칙
 - Evidence 저장 단위, 참조, 상세 응답 및 별도 API
 - 프론트엔드/Internal/PDF 다운로드 인증과 권한
-- 외부 Scanner/LLM/Executor HTTP endpoint, payload envelope, 인증
+- 운영용 secret manager와 서비스별 internal token 분리
 - Finding이 0개일 때의 규칙 기반 `overall_risk` 의미
 - Object Storage provider
 

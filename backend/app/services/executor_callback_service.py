@@ -17,10 +17,10 @@ from app.core.module_catalog import (
     UNKNOWN_MODULE_SUMMARY,
     UNKNOWN_MODULE_TITLE,
 )
-from app.models.finding import Finding
-from app.models.external_job import ExternalJob
-from app.models.report import Report
 from app.integrations.llm.base import LLMClient
+from app.models.external_job import ExternalJob
+from app.models.finding import Finding
+from app.models.report import Report
 from app.repositories.external_job_repository import ExternalJobRepository
 from app.repositories.finding_repository import FindingRepository
 from app.repositories.operation_repository import OperationRepository
@@ -29,8 +29,10 @@ from app.repositories.scan_repository import ScanRepository
 from app.schemas.callback import (
     CallbackAccepted,
     ExternalFailureCallback,
+    PlanApprovalCallback,
     ProgressCallback,
 )
+from app.schemas.contracts.evidence import EvidenceArtifact
 from app.schemas.contracts.scan_plan import ScanPlan
 from app.schemas.contracts.scan_result import ScanResult
 from app.services.artifact_service import ArtifactService
@@ -39,6 +41,12 @@ from app.services.progress_service import ProgressService
 
 
 class ExecutorCallbackService:
+    MODULE_BY_VULNERABILITY = {
+        "BOLA": "BOLA-001",
+        "INPUT_VALIDATION": "INPUT-001",
+        "DATA_EXPOSURE": "DATA-001",
+    }
+
     def __init__(
         self,
         scans: ScanRepository,
@@ -67,10 +75,13 @@ class ExecutorCallbackService:
         payload: ProgressCallback,
     ) -> CallbackAccepted:
         scan = await self._get_scan(scan_id)
-        if payload.stage not in {ScanStage.MODULE_EXECUTION, ScanStage.RESULT_VALIDATION}:
+        if payload.stage not in {
+            ScanStage.MODULE_EXECUTION,
+            ScanStage.RESULT_VALIDATION,
+        }:
             raise AppError(
                 ErrorCode.INVALID_REQUEST,
-                "실행기 진행 callback에 허용되지 않은 단계입니다.",
+                "The Scanner execution callback stage is not allowed.",
                 status_code=422,
             )
         self.progress.transition(
@@ -91,12 +102,106 @@ class ExecutorCallbackService:
             if requested_total > scan.max_requests:
                 raise AppError(
                     ErrorCode.SCAN_BUDGET_EXCEEDED,
-                    "실행기가 스캔 요청 예산을 초과했습니다.",
+                    "Scanner exceeded the scan request budget.",
                     status_code=422,
                 )
             scan.requests_used = max(scan.requests_used, requested_total)
         await self.scans.flush()
         return CallbackAccepted(details={"progress": scan.progress})
+
+    async def accept_evidence(
+        self,
+        scan_id: uuid.UUID,
+        evidence: EvidenceArtifact,
+    ) -> CallbackAccepted:
+        if evidence.scan_id != str(scan_id):
+            raise AppError(
+                ErrorCode.SCAN_RESULT_INVALID,
+                "Evidence scan_id does not match the callback path.",
+                status_code=422,
+            )
+        if not await self.scans.get(scan_id):
+            self._scan_not_found()
+        plan = await self._load_plan(scan_id)
+        await self._require_approved_execution(scan_id, plan.plan_id)
+        if (evidence.operation_id, evidence.module_id) not in {
+            (step.target_operation_id, step.module_id) for step in plan.steps
+        }:
+            raise AppError(
+                ErrorCode.SCAN_RESULT_INVALID,
+                "Evidence does not belong to a validated plan step.",
+                status_code=422,
+            )
+        artifact, created = await self.artifacts.store_json(
+            scan_id,
+            ArtifactType.EVIDENCE,
+            evidence.model_dump(mode="json"),
+            None,
+        )
+        return CallbackAccepted(
+            duplicate=not created,
+            details={"artifact_id": str(artifact.id)},
+        )
+
+    async def accept_plan_approval(
+        self,
+        scan_id: uuid.UUID,
+        payload: PlanApprovalCallback,
+    ) -> CallbackAccepted:
+        scan = await self._get_scan(scan_id)
+        plan = await self._load_plan(scan_id)
+        job = await self.jobs.by_external_id(
+            scan_id,
+            JobType.MODULE_EXECUTION,
+            payload.job_id,
+        )
+        if (
+            job is None
+            or plan.plan_id != payload.plan_id
+            or job.plan_id != payload.plan_id
+        ):
+            raise AppError(
+                ErrorCode.SCAN_PLAN_INVALID,
+                "Scan, plan, and execution job do not match.",
+                status_code=422,
+            )
+        if job.approval_status is not None:
+            if (
+                job.approval_status == payload.status
+                and (job.approval_reason_codes_json or []) == payload.reason_codes
+            ):
+                return CallbackAccepted(
+                    duplicate=True,
+                    details={"plan_status": job.approval_status},
+                )
+            raise AppError(
+                ErrorCode.SCAN_PLAN_INVALID,
+                "A different plan approval decision is already stored.",
+                status_code=409,
+            )
+
+        job.approval_status = payload.status
+        job.approval_reason_codes_json = payload.reason_codes
+        if payload.status == "APPROVED":
+            job.status = JobStatus.RUNNING
+            self.progress.transition(
+                scan,
+                status=ScanStatus.RUNNING,
+                stage=ScanStage.MODULE_EXECUTION,
+            )
+        else:
+            job.status = JobStatus.FAILED
+            job.error_code = ErrorCode.SCAN_PLAN_INVALID.value
+            job.error_message = "Scanner rejected the scan plan."
+            job.completed_at = datetime.now(UTC)
+            scan.status = ScanStatus.FAILED
+            scan.stage = ScanStage.PLAN_VALIDATION
+            scan.error_code = ErrorCode.SCAN_PLAN_INVALID.value
+            scan.error_message = "Scanner rejected the scan plan."
+            scan.completed_at = datetime.now(UTC)
+        await self.jobs.flush()
+        await self.scans.flush()
+        return CallbackAccepted(details={"plan_status": payload.status})
 
     async def accept_scan_result(
         self,
@@ -121,31 +226,41 @@ class ExecutorCallbackService:
         if missing_operations:
             raise AppError(
                 ErrorCode.SCAN_RESULT_INVALID,
-                "스캔 결과가 존재하지 않는 Operation을 참조합니다.",
+                "Scan result references unknown operations.",
                 status_code=422,
                 details={"operation_ids": sorted(missing_operations)},
             )
-        plan_json = await self.artifacts.read_latest_json(scan_id, ArtifactType.SCAN_PLAN)
-        if plan_json is None:
-            raise AppError(
-                ErrorCode.SCAN_RESULT_INVALID,
-                "검증에 필요한 Scan Plan 산출물이 없습니다.",
-                status_code=409,
-            )
-        plan = ScanPlan.model_validate(plan_json)
-        approved_modules = {step.module_id for step in plan.steps}
-        invalid_modules = {
-            finding.module_id
-            for finding in result.findings
-            if finding.module_id not in approved_modules
+
+        plan = await self._load_plan(scan_id)
+        await self._require_approved_execution(scan_id, plan.plan_id)
+        approved_pairs = {
+            (step.target_operation_id, step.module_id) for step in plan.steps
         }
-        if invalid_modules:
+        invalid_pairs = {
+            (
+                finding.operation_id,
+                self.MODULE_BY_VULNERABILITY[finding.vulnerability_type],
+            )
+            for finding in result.findings
+            if (
+                finding.operation_id,
+                self.MODULE_BY_VULNERABILITY[finding.vulnerability_type],
+            )
+            not in approved_pairs
+        }
+        if invalid_pairs:
             raise AppError(
                 ErrorCode.SCAN_RESULT_INVALID,
-                "실행 계획에 없는 모듈의 결과가 포함되었습니다.",
+                "Scan result contains an operation/module pair not present in the plan.",
                 status_code=422,
-                details={"module_ids": sorted(invalid_modules)},
+                details={
+                    "operation_module_pairs": [
+                        {"operation_id": operation_id, "module_id": module_id}
+                        for operation_id, module_id in sorted(invalid_pairs)
+                    ]
+                },
             )
+        await self._validate_evidence_refs(scan_id, result)
 
         artifact, created = await self.artifacts.store_json(
             scan_id,
@@ -154,7 +269,10 @@ class ExecutorCallbackService:
             result.schema_version,
         )
         if not created:
-            return CallbackAccepted(duplicate=True, details={"artifact_id": str(artifact.id)})
+            return CallbackAccepted(
+                duplicate=True,
+                details={"artifact_id": str(artifact.id)},
+            )
 
         existing_ids = await self.findings.existing_global_ids(
             {finding.finding_id for finding in result.findings}
@@ -162,30 +280,33 @@ class ExecutorCallbackService:
         if existing_ids:
             raise AppError(
                 ErrorCode.SCAN_RESULT_INVALID,
-                "이미 존재하는 finding_id가 포함되었습니다.",
+                "Scan result contains finding IDs that already exist.",
                 status_code=409,
                 details={"finding_ids": sorted(existing_ids)},
             )
-        models = [
-            Finding(
-                id=item.finding_id,
-                scan_id=scan_id,
-                operation_id=item.operation_id,
-                operation_pk=operations[item.operation_id].id,
-                module_id=item.module_id,
-                severity=item.severity,
-                rule_id=item.verification.rule_id,
-                verified_conditions_json=item.verification.verified_conditions,
-                affected_fields_json=[
-                    field.model_dump(mode="json") for field in item.affected_fields
-                ],
-                # TODO: Evidence contract pending.
-                evidence_refs_json=item.evidence_refs or [],
-                title=MODULE_TITLES.get(item.module_id, UNKNOWN_MODULE_TITLE),
-                summary=MODULE_SUMMARIES.get(item.module_id, UNKNOWN_MODULE_SUMMARY),
+        models = []
+        for item in result.findings:
+            module_id = self.MODULE_BY_VULNERABILITY[item.vulnerability_type]
+            models.append(
+                Finding(
+                    id=item.finding_id,
+                    scan_id=scan_id,
+                    operation_id=item.operation_id,
+                    operation_pk=operations[item.operation_id].id,
+                    module_id=module_id,
+                    vulnerability_type=item.vulnerability_type,
+                    severity=None,
+                    rule_id=item.verification.rule_id,
+                    verified_conditions_json=item.verification.verified_conditions,
+                    affected_fields_json=[
+                        field.model_dump(mode="json")
+                        for field in item.affected_fields
+                    ],
+                    evidence_refs_json=item.evidence_refs,
+                    title=MODULE_TITLES.get(module_id, UNKNOWN_MODULE_TITLE),
+                    summary=MODULE_SUMMARIES.get(module_id, UNKNOWN_MODULE_SUMMARY),
+                )
             )
-            for item in result.findings
-        ]
         await self.findings.replace_for_scan(scan_id, models)
         execution_job = await self.jobs.latest_for_scan_and_type(
             scan_id,
@@ -205,7 +326,7 @@ class ExecutorCallbackService:
                 status=ReportStatus.GENERATING,
             )
         )
-        submission = await self.llm.request_report(str(scan_id))
+        submission = await self.llm.request_report(result)
         await self.jobs.add(
             ExternalJob(
                 scan_id=scan_id,
@@ -259,15 +380,95 @@ class ExecutorCallbackService:
         await self.scans.flush()
         return CallbackAccepted(details={"status": ScanStatus.FAILED.value})
 
+    async def _load_plan(self, scan_id: uuid.UUID) -> ScanPlan:
+        plan_json = await self.artifacts.read_latest_json(
+            scan_id,
+            ArtifactType.SCAN_PLAN,
+        )
+        if plan_json is None:
+            raise AppError(
+                ErrorCode.SCAN_PLAN_INVALID,
+                "Scan Plan artifact is missing.",
+                status_code=409,
+            )
+        return ScanPlan.model_validate(plan_json)
+
+    async def _require_approved_execution(
+        self,
+        scan_id: uuid.UUID,
+        plan_id: str,
+    ) -> None:
+        job = await self.jobs.latest_for_scan_and_type(
+            scan_id,
+            JobType.MODULE_EXECUTION,
+        )
+        if (
+            job is None
+            or job.plan_id != plan_id
+            or job.approval_status != "APPROVED"
+        ):
+            raise AppError(
+                ErrorCode.SCAN_PLAN_INVALID,
+                "Scanner has not approved this execution plan.",
+                status_code=409,
+            )
+
+    async def _validate_evidence_refs(
+        self,
+        scan_id: uuid.UUID,
+        result: ScanResult,
+    ) -> None:
+        references = {
+            reference
+            for finding in result.findings
+            for reference in finding.evidence_refs
+        }
+        artifact_ids: set[uuid.UUID] = set()
+        for reference in references:
+            if not reference.startswith("artifact:"):
+                raise AppError(
+                    ErrorCode.SCAN_RESULT_INVALID,
+                    "Evidence references must use artifact:<id>.",
+                    status_code=422,
+                )
+            try:
+                artifact_ids.add(uuid.UUID(reference.removeprefix("artifact:")))
+            except ValueError as exc:
+                raise AppError(
+                    ErrorCode.SCAN_RESULT_INVALID,
+                    "Evidence reference is not a valid artifact ID.",
+                    status_code=422,
+                ) from exc
+        existing = await self.artifacts.repository.existing_ids_for_scan(
+            scan_id,
+            ArtifactType.EVIDENCE,
+            artifact_ids,
+        )
+        if existing != artifact_ids:
+            raise AppError(
+                ErrorCode.SCAN_RESULT_INVALID,
+                "Evidence reference does not belong to this scan.",
+                status_code=422,
+                details={
+                    "artifact_ids": sorted(
+                        str(item) for item in artifact_ids - existing
+                    )
+                },
+            )
+
     async def _get_scan(self, scan_id: uuid.UUID):
         scan = await self.scans.get_for_update(scan_id)
         if not scan:
-            raise AppError(
-                ErrorCode.SCAN_NOT_FOUND,
-                "해당 스캔을 찾을 수 없습니다.",
-                status_code=404,
-            )
+            self._scan_not_found()
         return scan
+
+    @staticmethod
+    def _scan_not_found() -> None:
+        raise AppError(
+            ErrorCode.SCAN_NOT_FOUND,
+            "Scan was not found.",
+            status_code=404,
+        )
 
     @staticmethod
     def _job_type_for_failure(stage: ScanStage) -> JobType | None:

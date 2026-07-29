@@ -14,7 +14,7 @@ class ProgressCallback(APIModel):
 
 
 class ExternalFailureCallback(APIModel):
-    source: Literal["SCANNER", "LLM", "EXECUTOR"]
+    source: Literal["SCANNER", "LLM"]
     stage: ScanStage
     error: ErrorDetail
 
@@ -23,4 +23,11 @@ class CallbackAccepted(APIModel):
     accepted: bool = True
     duplicate: bool = False
     details: dict[str, Any] | None = None
+
+
+class PlanApprovalCallback(APIModel):
+    job_id: str
+    plan_id: str
+    status: Literal["APPROVED", "REJECTED"]
+    reason_codes: list[str] = Field(default_factory=list)
 

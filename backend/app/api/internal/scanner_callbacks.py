@@ -39,7 +39,11 @@ def get_scanner_callback_service(
     llm = (
         MockLLMClient()
         if settings.use_mock_integrations
-        else HTTPLLMClient(settings.llm_base_url)
+        else HTTPLLMClient(
+            settings.llm_base_url,
+            service_token=settings.internal_service_token,
+            timeout_seconds=settings.integration_timeout_seconds,
+        )
     )
     return ScannerCallbackService(
         scans,

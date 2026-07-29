@@ -60,6 +60,8 @@ def register_exception_handlers(app: FastAPI) -> None:
             "/relationship-analysis": ErrorCode.RELATIONSHIP_ANALYSIS_INVALID,
             "/scan-plan": ErrorCode.SCAN_PLAN_INVALID,
             "/scan-result": ErrorCode.SCAN_RESULT_INVALID,
+            "/evidence": ErrorCode.SCAN_RESULT_INVALID,
+            "/plan-approval": ErrorCode.SCAN_PLAN_INVALID,
             "/ai-report": ErrorCode.REPORT_GENERATION_FAILED,
         }
         code = next(

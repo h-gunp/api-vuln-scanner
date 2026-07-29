@@ -1,2 +1,2 @@
-"""External scanner, LLM, and executor clients."""
+"""External Scanner and LLM clients."""
 

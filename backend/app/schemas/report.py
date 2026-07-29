@@ -1,7 +1,7 @@
 import uuid
 
-from app.core.enums import Severity
 from app.schemas.common import APIModel
+from app.schemas.contracts.ai_report import ReportSeverity
 
 
 class AIReportFindingResponse(APIModel):
@@ -16,6 +16,6 @@ class AIReportResponse(APIModel):
     report_id: str
     scan_id: uuid.UUID
     summary: str
-    overall_risk: Severity
+    overall_risk: ReportSeverity
     findings: list[AIReportFindingResponse]
 

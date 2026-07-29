@@ -2,16 +2,17 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from app.core.enums import Severity
-from app.schemas.common import APIModel
+from app.schemas.common import ArtifactModel
+
+VulnerabilityType = Literal["BOLA", "INPUT_VALIDATION", "DATA_EXPOSURE"]
 
 
-class Verification(APIModel):
+class Verification(ArtifactModel):
     rule_id: str
     verified_conditions: list[str] = Field(min_length=1)
 
 
-class AffectedField(APIModel):
+class AffectedField(ArtifactModel):
     location: Literal["request", "response"]
     field_path: str
     data_class: Literal[
@@ -24,21 +25,19 @@ class AffectedField(APIModel):
     ]
 
 
-class ScanResultFinding(APIModel):
+class ScanResultFinding(ArtifactModel):
     finding_id: str
     operation_id: str
-    module_id: str
-    severity: Severity
+    vulnerability_type: VulnerabilityType
     verification: Verification
-    affected_fields: list[AffectedField] = Field(default_factory=list)
-    # TODO: Evidence contract pending.
-    evidence_refs: list[str] | None = None
+    affected_fields: list[AffectedField]
+    evidence_refs: list[str]
 
 
-class ScanResult(APIModel):
+class ScanResult(ArtifactModel):
     schema_version: Literal["1.2"] = "1.2"
     scan_id: str
-    findings: list[ScanResultFinding] = Field(default_factory=list)
+    findings: list[ScanResultFinding]
 
     @model_validator(mode="after")
     def finding_ids_are_unique(self) -> "ScanResult":

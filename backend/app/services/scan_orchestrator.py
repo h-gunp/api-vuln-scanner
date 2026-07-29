@@ -64,7 +64,7 @@ class ScanOrchestrator:
                 status_code=500,
             )
         profile = TargetProfile.model_validate(profile_json)
-        submission = await self.scanner.submit_scan(profile)
+        submission = await self.scanner.submit_discovery(profile)
         await self.jobs.add(
             ExternalJob(
                 scan_id=scan_id,

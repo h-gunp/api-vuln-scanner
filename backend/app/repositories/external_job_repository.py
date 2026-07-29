@@ -32,5 +32,21 @@ class ExternalJobRepository:
         )
         return await self.session.scalar(statement)
 
+    async def by_external_id(
+        self,
+        scan_id: uuid.UUID,
+        job_type: JobType,
+        external_job_id: str,
+    ) -> ExternalJob | None:
+        return await self.session.scalar(
+            select(ExternalJob)
+            .where(
+                ExternalJob.scan_id == scan_id,
+                ExternalJob.job_type == job_type,
+                ExternalJob.external_job_id == external_job_id,
+            )
+            .with_for_update()
+        )
+
     async def flush(self) -> None:
         await self.session.flush()

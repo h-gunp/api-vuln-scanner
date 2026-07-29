@@ -6,11 +6,15 @@ from pathlib import Path
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings, get_settings
 from app.core.database import Base, get_db_session
+from app.core.enums import ArtifactType, Severity
 from app.main import app
+from app.models.finding import Finding
+from app.models.scan_artifact import ScanArtifact
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -51,6 +55,7 @@ async def client(tmp_path: Path) -> AsyncIterator[httpx.AsyncClient]:
     app.dependency_overrides[get_settings] = lambda: test_settings
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as api_client:
+        api_client.test_session_factory = session_factory  # type: ignore[attr-defined]
         yield api_client
     app.dependency_overrides.clear()
     async with engine.begin() as connection:
@@ -113,7 +118,18 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
         "prompt_version": "rel-v2",
         "prompt_sha256": "a" * 64,
         "approved_module_ids": ["BOLA-001"],
-        "relationships": [],
+        "relationships": [
+            {
+                "relationship_id": "rel-call-order",
+                "source_operation_id": "GET:/api/users/{user_id}",
+                "target_operation_id": "GET:/api/users/{user_id}",
+                "source_field": None,
+                "target_parameter": None,
+                "target_parameter_location": None,
+                "relationship_type": "call_order",
+                "confidence": 0.9,
+            }
+        ],
         "test_candidates": [
             {
                 "candidate_id": "candidate-001",
@@ -172,7 +188,14 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
                         "binding_type": "object_binding",
                         "object_type": "user",
                         "owner": "user_b",
-                    }
+                    },
+                    {
+                        "parameter": "page",
+                        "location": "query",
+                        "binding_type": "parameter_binding",
+                        "object_type": None,
+                        "owner": None,
+                    },
                 ],
             }
         ],
@@ -182,7 +205,61 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
         json=plan,
     )
     assert plan_response.status_code == 200, plan_response.text
-    assert plan_response.json()["details"]["plan_status"] == "APPROVED"
+    assert plan_response.json()["details"]["plan_status"] == "PENDING_APPROVAL"
+    execution_job_id = plan_response.json()["details"]["external_job_id"]
+
+    approval = await client.post(
+        f"/internal/scans/{scan_id}/plan-approval",
+        json={
+            "job_id": execution_job_id,
+            "plan_id": plan["plan_id"],
+            "status": "APPROVED",
+            "reason_codes": [],
+        },
+    )
+    assert approval.status_code == 200, approval.text
+    duplicate_approval = await client.post(
+        f"/internal/scans/{scan_id}/plan-approval",
+        json={
+            "job_id": execution_job_id,
+            "plan_id": plan["plan_id"],
+            "status": "APPROVED",
+            "reason_codes": [],
+        },
+    )
+    assert duplicate_approval.json()["duplicate"] is True
+
+    evidence = {
+        "scan_id": scan_id,
+        "operation_id": "GET:/api/users/{user_id}",
+        "module_id": "BOLA-001",
+        "rule_id": "VERIFY-BOLA-001",
+        "verified_conditions": ["BOLA_FOREIGN_OBJECT_RETURNED"],
+        "affected_fields": [
+            {
+                "location": "response",
+                "field_path": "account.balance",
+                "data_class": "financial",
+            }
+        ],
+        "baseline": {
+            "actor_id": "user_a",
+            "status_code": 200,
+            "observed_field_paths": ["account.balance"],
+        },
+        "variant": {
+            "actor_id": "user_b",
+            "status_code": 200,
+            "response_structure_sha256": "d" * 64,
+        },
+    }
+    evidence_response = await client.post(
+        f"/internal/scans/{scan_id}/evidence",
+        json=evidence,
+    )
+    assert evidence_response.status_code == 200, evidence_response.text
+    evidence_id = evidence_response.json()["details"]["artifact_id"]
+    evidence_ref = f"artifact:{evidence_id}"
 
     scan_result = {
         "schema_version": "1.2",
@@ -191,14 +268,13 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
             {
                 "finding_id": "finding-001",
                 "operation_id": "GET:/api/users/{user_id}",
-                "module_id": "BOLA-001",
-                "severity": "HIGH",
+                "vulnerability_type": "BOLA",
                 "verification": {
-                    "rule_id": "BOLA-RULE-001",
-                    "verified_conditions": ["CROSS_USER_ACCESS_SUCCEEDED"],
+                    "rule_id": "VERIFY-BOLA-001",
+                    "verified_conditions": ["BOLA_FOREIGN_OBJECT_RETURNED"],
                 },
-                "affected_fields": [],
-                "evidence_refs": [],
+                "affected_fields": evidence["affected_fields"],
+                "evidence_refs": [evidence_ref],
             }
         ],
     }
@@ -209,12 +285,12 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
     assert result_response.status_code == 200, result_response.text
     report_id = result_response.json()["details"]["report_id"]
 
-    findings = await client.get(
-        f"/api/scans/{scan_id}/findings",
-        params={"q": "users", "severity": "HIGH"},
-    )
+    findings = await client.get(f"/api/scans/{scan_id}/findings")
     assert findings.status_code == 200
     assert findings.json()["total_elements"] == 1
+    assert findings.json()["items"][0]["module_id"] == "BOLA-001"
+    assert findings.json()["items"][0]["vulnerability_type"] == "BOLA"
+    assert findings.json()["items"][0]["severity"] is None
     detail = await client.get("/api/findings/finding-001")
     assert detail.status_code == 200
     assert detail.json()["analysis"] is None
@@ -225,12 +301,11 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
 
     ai_report = {
         "schema_version": "1.2",
-        "report_id": report_id,
         "scan_id": scan_id,
         "model_name": "mock-llm",
         "prompt_version": "report-v2",
         "prompt_sha256": "c" * 64,
-        "overall_risk": "HIGH",
+        "overall_risk": "high",
         "overall_risk_basis": "rule:max_verified_severity",
         "summary": "검증된 취약점 1건이 확인되었습니다.",
         "findings": [
@@ -241,8 +316,8 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
                 "attack_flow": ["User A 로그인", "User B 객체 요청"],
                 "impact": "다른 사용자의 정보가 노출될 수 있습니다.",
                 "recommendation": "서버 측 소유권 검증을 적용합니다.",
-                "severity": "HIGH",
-                "evidence_refs": [],
+                "severity": "high",
+                "evidence_refs": [evidence_ref],
             }
         ],
     }
@@ -254,7 +329,8 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
 
     report = await client.get(f"/api/scans/{scan_id}/ai-report")
     assert report.status_code == 200
-    assert report.json()["overall_risk"] == "HIGH"
+    assert report.json()["report_id"] == report_id
+    assert report.json()["overall_risk"] == "high"
     enriched_detail = await client.get("/api/findings/finding-001")
     assert enriched_detail.json()["analysis"]["root_cause"].startswith("객체")
 
@@ -267,7 +343,24 @@ async def test_complete_callback_driven_pipeline(client: httpx.AsyncClient) -> N
     assert completed.json()["status"] == "COMPLETED"
     assert completed.json()["progress"] == 100
     completed_summary = await client.get(f"/api/scans/{scan_id}/summary")
-    assert completed_summary.json()["overall_risk"] == "HIGH"
+    assert completed_summary.json()["overall_risk"] == "high"
+
+    session_factory = client.test_session_factory  # type: ignore[attr-defined]
+    async with session_factory() as session:
+        stored_finding = await session.get(Finding, "finding-001")
+        assert stored_finding is not None
+        assert stored_finding.vulnerability_type == "BOLA"
+        assert stored_finding.module_id == "BOLA-001"
+        assert stored_finding.severity == Severity.HIGH
+        assert stored_finding.evidence_refs_json == [evidence_ref]
+        stored_evidence = await session.scalar(
+            select(ScanArtifact).where(
+                ScanArtifact.id == uuid.UUID(evidence_id),
+                ScanArtifact.artifact_type == ArtifactType.EVIDENCE,
+            )
+        )
+        assert stored_evidence is not None
+        assert "/results/evidence/" in stored_evidence.storage_path
 
 
 @pytest.mark.asyncio

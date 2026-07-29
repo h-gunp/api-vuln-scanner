@@ -22,8 +22,9 @@ class Finding(Base):
         UUID(as_uuid=True), ForeignKey("operations.id", ondelete="RESTRICT")
     )
     module_id: Mapped[str] = mapped_column(String(80), index=True)
-    severity: Mapped[Severity] = mapped_column(
-        Enum(Severity, native_enum=False, length=20), index=True
+    vulnerability_type: Mapped[str] = mapped_column(String(40), index=True)
+    severity: Mapped[Severity | None] = mapped_column(
+        Enum(Severity, native_enum=False, length=20), index=True, nullable=True
     )
     rule_id: Mapped[str] = mapped_column(String(255))
     verified_conditions_json: Mapped[list[str]] = mapped_column(JSONB, default=list)

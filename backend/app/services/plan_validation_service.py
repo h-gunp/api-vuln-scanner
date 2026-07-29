@@ -85,12 +85,10 @@ class PlanValidationService:
                     status_code=422,
                 )
             for binding in step.input_bindings:
-                if binding.owner not in actors:
+                if binding.binding_type == "object_binding" and binding.owner not in actors:
                     self._invalid(f"존재하지 않는 actor입니다: {binding.owner}")
 
-        approved = plan.model_copy(deep=True)
-        approved.status = PlanStatus.APPROVED
-        return approved
+        return plan
 
     @staticmethod
     def _invalid(message: str) -> None:

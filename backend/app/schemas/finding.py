@@ -15,7 +15,8 @@ class FindingEndpoint(APIModel):
 class FindingListItem(APIModel):
     finding_id: str
     module_id: str
-    severity: Severity
+    vulnerability_type: str
+    severity: Severity | None
     target_endpoint: FindingEndpoint
     title: str
     summary: str
@@ -44,7 +45,8 @@ class FindingAnalysis(APIModel):
 class FindingDetailResponse(APIModel):
     finding_id: str
     module_id: str
-    severity: Severity
+    vulnerability_type: str
+    severity: Severity | None
     target_endpoint: FindingEndpoint
     verification: FindingVerification
     affected_fields: list[dict[str, Any]]

@@ -2,39 +2,53 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from app.schemas.common import APIModel
+from app.schemas.common import ArtifactModel
 
 ParameterLocation = Literal["path", "query", "header", "body"]
 
 
-class OperationRelationship(APIModel):
+class OperationRelationship(ArtifactModel):
     relationship_id: str
     source_operation_id: str
     target_operation_id: str
-    source_field: str
-    target_parameter: str
-    target_parameter_location: ParameterLocation
-    relationship_type: str
-    confidence: float = Field(ge=0, le=1)
+    source_field: str | None = None
+    target_parameter: str | None = None
+    target_parameter_location: ParameterLocation | None = None
+    relationship_type: Literal["id_flow", "ownership", "call_order", "data_flow"]
+    confidence: float = Field(ge=0.5, le=1)
+
+    @model_validator(mode="after")
+    def validate_reference_shape(self) -> "OperationRelationship":
+        references = (
+            self.source_field,
+            self.target_parameter,
+            self.target_parameter_location,
+        )
+        if self.relationship_type == "call_order":
+            if any(reference is not None for reference in references):
+                raise ValueError("call_order must not contain field references")
+        elif any(reference is None for reference in references):
+            raise ValueError("data relationships require field references")
+        return self
 
 
-class BindingHint(APIModel):
+class BindingHint(ArtifactModel):
     parameter: str
     location: ParameterLocation
-    binding_type: str
-    object_type: str
+    binding_type: Literal["object_binding", "parameter_binding"]
+    object_type: str | None = None
 
 
-class TestCandidate(APIModel):
+class TestCandidate(ArtifactModel):
     candidate_id: str
-    module_id: str
+    module_id: Literal["BOLA-001", "INPUT-001", "DATA-001"]
     target_operation_id: str
-    required_object_types: list[str] = Field(default_factory=list)
+    required_object_types: list[str]
     rationale: str
     priority: int = Field(ge=1)
     executable: bool
-    missing_requirements: list[str] = Field(default_factory=list)
-    binding_hints: list[BindingHint] = Field(default_factory=list)
+    missing_requirements: list[str]
+    binding_hints: list[BindingHint]
 
     @model_validator(mode="after")
     def require_missing_reasons(self) -> "TestCandidate":
@@ -43,15 +57,15 @@ class TestCandidate(APIModel):
         return self
 
 
-class RelationshipAnalysis(APIModel):
+class RelationshipAnalysis(ArtifactModel):
     schema_version: Literal["1.2"] = "1.2"
     scan_id: str
     model_name: str
     prompt_version: str
-    prompt_sha256: str
+    prompt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     approved_module_ids: list[str] = Field(min_length=1)
-    relationships: list[OperationRelationship] = Field(default_factory=list)
-    test_candidates: list[TestCandidate] = Field(default_factory=list)
+    relationships: list[OperationRelationship]
+    test_candidates: list[TestCandidate]
 
     @model_validator(mode="after")
     def validate_identifiers_and_modules(self) -> "RelationshipAnalysis":

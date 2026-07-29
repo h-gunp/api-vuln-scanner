@@ -29,7 +29,10 @@ class TargetProfileService:
                 allowed_paths=[allowed_pattern],
                 allowed_methods=["GET"],
             ),
-            discovery=DiscoveryPolicy(max_depth=self.settings.discovery_max_depth),
+            discovery=DiscoveryPolicy(
+                sources=["openapi", "crawl"],
+                max_depth=self.settings.discovery_max_depth,
+            ),
             authentication=AuthenticationConfig(
                 login=LoginConfig(
                     method="POST",

@@ -21,6 +21,7 @@ from app.services.artifact_service import ArtifactService
 from app.services.masking_service import MaskingService
 from app.services.plan_validation_service import PlanValidationService
 from app.services.progress_service import ProgressService
+from app.services.report_service import ReportService
 from app.services.target_health_service import TargetHealthService
 from app.services.target_profile_service import TargetProfileService
 from app.storage.local import LocalStorage
@@ -200,15 +201,22 @@ def test_plan_budget_and_policy_validation(tmp_path: Path) -> None:
                         "method": "GET",
                         "path_template": "/users/{user_id}",
                     },
-                    "input_bindings": [
+                        "input_bindings": [
                         {
                             "parameter": "user_id",
                             "location": "path",
                             "binding_type": "object_binding",
                             "object_type": "user",
-                            "owner": "user_b",
-                        }
-                    ],
+                                "owner": "user_b",
+                            },
+                            {
+                                "parameter": "page",
+                                "location": "query",
+                                "binding_type": "parameter_binding",
+                                "object_type": None,
+                                "owner": None,
+                            },
+                        ],
                 }
             ],
         }
@@ -221,7 +229,8 @@ def test_plan_budget_and_policy_validation(tmp_path: Path) -> None:
         analysis,
         {"GET:/users/{user_id}"},
     )
-    assert approved.status == PlanStatus.APPROVED
+    assert approved is plan
+    assert approved.status == PlanStatus.PENDING_APPROVAL
     assert plan.status == PlanStatus.PENDING_APPROVAL
 
     invalid = plan.model_copy(deep=True)
@@ -247,6 +256,10 @@ def test_severity_sort_order() -> None:
     from app.core.enums import SEVERITY_RANK
 
     assert sorted(order, key=SEVERITY_RANK.get, reverse=True) == order
+
+
+def test_zero_finding_report_risk_is_contract_low() -> None:
+    assert ReportService._overall_risk([]) == "low"
 
 
 def test_recursive_masking_for_json_arrays_and_headers() -> None:
@@ -299,6 +312,35 @@ class FakeArtifactRepository:
         artifact.id = uuid.uuid4()
         self.items.append(artifact)
         return artifact
+
+
+@pytest.mark.asyncio
+async def test_evidence_artifacts_allow_multiple_immutable_content_paths(
+    tmp_path: Path,
+) -> None:
+    repository = FakeArtifactRepository()
+    service = ArtifactService(repository, LocalStorage(tmp_path))  # type: ignore[arg-type]
+    scan_id = uuid.uuid4()
+
+    first, first_created = await service.store_json(
+        scan_id,
+        ArtifactType.EVIDENCE,
+        {"scan_id": str(scan_id), "observation": "first"},
+        None,
+    )
+    second, second_created = await service.store_json(
+        scan_id,
+        ArtifactType.EVIDENCE,
+        {"scan_id": str(scan_id), "observation": "second"},
+        None,
+    )
+
+    assert first_created is True
+    assert second_created is True
+    assert first.id != second.id
+    assert first.storage_path.startswith(f"scans/{scan_id}/results/evidence/")
+    assert first.storage_path.endswith(f"{first.checksum_sha256}.json")
+    assert second.storage_path.endswith(f"{second.checksum_sha256}.json")
 
 
 @pytest.mark.asyncio

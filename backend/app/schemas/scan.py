@@ -3,8 +3,9 @@ from typing import Any
 
 from pydantic import Field, HttpUrl, field_serializer
 
-from app.core.enums import ReportStatus, ScanStage, ScanStatus, Severity
+from app.core.enums import ReportStatus, ScanStage, ScanStatus
 from app.schemas.common import APIModel, ErrorDetail
+from app.schemas.contracts.ai_report import ReportSeverity
 
 
 class ScanCreateRequest(APIModel):
@@ -41,6 +42,6 @@ class ScanSummaryResponse(APIModel):
     finding_count: int = Field(ge=0)
     planned_module_count: int = Field(ge=0)
     completed_module_count: int = Field(ge=0)
-    overall_risk: Severity | None = None
+    overall_risk: ReportSeverity | None = None
     report_status: ReportStatus = ReportStatus.PENDING
 

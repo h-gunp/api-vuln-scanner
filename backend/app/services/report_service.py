@@ -7,7 +7,6 @@ from app.core.enums import (
     JobStatus,
     JobType,
     ReportStatus,
-    SEVERITY_RANK,
     ScanStage,
     ScanStatus,
     Severity,
@@ -68,53 +67,71 @@ class ReportService:
         if not scan:
             raise AppError(
                 ErrorCode.SCAN_NOT_FOUND,
-                "해당 스캔을 찾을 수 없습니다.",
+                "Scan was not found.",
                 status_code=404,
             )
-        report = await self.reports.get(payload.report_id)
-        if not report or report.scan_id != scan_id:
+        # A report_id is backend-owned. The callback artifact is linked to the
+        # newest report created for this scan, which is GENERATING on first receipt.
+        report = await self.reports.latest_for_scan_and_status(
+            scan_id,
+            ReportStatus.GENERATING,
+        )
+        if report is None:
+            completed = await self.reports.latest_for_scan(scan_id)
+            report = (
+                completed
+                if completed and completed.status == ReportStatus.COMPLETED
+                else None
+            )
+        if report is None:
             raise AppError(
                 ErrorCode.REPORT_NOT_FOUND,
-                "백엔드가 발급한 보고서 작업을 찾을 수 없습니다.",
+                "No generating report exists for this scan.",
                 status_code=404,
             )
+
         finding_models = await self.findings.list_models_for_scan(scan_id)
         finding_map = {finding.id: finding for finding in finding_models}
-        unknown = {item.finding_id for item in payload.findings} - set(finding_map)
-        if unknown:
+        payload_ids = {item.finding_id for item in payload.findings}
+        stored_ids = set(finding_map)
+        if payload_ids != stored_ids:
             raise AppError(
                 ErrorCode.REPORT_GENERATION_FAILED,
-                "AI 보고서가 검증되지 않은 Finding을 포함합니다.",
+                "AI report finding IDs must exactly match the scan result.",
                 status_code=422,
-                details={"finding_ids": sorted(unknown)},
+                details={
+                    "missing_finding_ids": sorted(stored_ids - payload_ids),
+                    "extra_finding_ids": sorted(payload_ids - stored_ids),
+                },
             )
-        severity_mismatches = [
+        evidence_mismatches = [
             item.finding_id
             for item in payload.findings
-            if item.severity != finding_map[item.finding_id].severity
+            if item.evidence_refs
+            != finding_map[item.finding_id].evidence_refs_json
         ]
-        if severity_mismatches:
+        if evidence_mismatches:
             raise AppError(
                 ErrorCode.REPORT_GENERATION_FAILED,
-                "AI 보고서가 규칙 기반 심각도를 변경했습니다.",
+                "AI report evidence_refs must exactly match the scan result.",
                 status_code=422,
-                details={"finding_ids": severity_mismatches},
+                details={"finding_ids": evidence_mismatches},
             )
         expected_risk = self._overall_risk(
-            [finding.severity for finding in finding_models]
+            [finding.severity for finding in payload.findings]
         )
         if payload.overall_risk != expected_risk:
             raise AppError(
                 ErrorCode.REPORT_GENERATION_FAILED,
-                "overall_risk가 규칙 기반 최대 심각도와 일치하지 않습니다.",
+                "overall_risk must equal the maximum finding severity.",
                 status_code=422,
-                details={"expected": expected_risk.value},
+                details={"expected": expected_risk},
             )
+
         for analysis in payload.findings:
-            # The report contract has no per-finding "summary"; impact is the closest
-            # frontend summary field until that mapping is finalized.
-            # TODO: Finding AI summary field mapping contract pending.
-            finding_map[analysis.finding_id].summary = analysis.impact
+            finding = finding_map[analysis.finding_id]
+            finding.severity = Severity(analysis.severity.upper())
+            finding.summary = analysis.impact
 
         ai_artifact, created = await self.artifacts.store_json(
             scan_id,
@@ -129,7 +146,7 @@ class ReportService:
             )
         pdf_content = await self.pdf_generator.generate(
             str(scan_id),
-            payload.overall_risk.value,
+            payload.overall_risk,
         )
         pdf_artifact, _ = await self.artifacts.store_pdf(scan_id, pdf_content)
         report.ai_report_artifact_id = ai_artifact.id
@@ -163,7 +180,7 @@ class ReportService:
         if not await self.scans.get(scan_id):
             raise AppError(
                 ErrorCode.SCAN_NOT_FOUND,
-                "해당 스캔을 찾을 수 없습니다.",
+                "Scan was not found.",
                 status_code=404,
             )
         report = await self.reports.latest_for_scan(scan_id)
@@ -173,12 +190,12 @@ class ReportService:
         if value is None:
             raise AppError(
                 ErrorCode.REPORT_NOT_READY,
-                "AI 보고서가 아직 준비되지 않았습니다.",
+                "AI report is not ready.",
                 status_code=409,
             )
         payload = AIReport.model_validate(value)
         return AIReportResponse(
-            report_id=payload.report_id,
+            report_id=report.id,
             scan_id=scan_id,
             summary=payload.summary,
             overall_risk=payload.overall_risk,
@@ -199,7 +216,7 @@ class ReportService:
         if not report:
             raise AppError(
                 ErrorCode.REPORT_NOT_FOUND,
-                "해당 보고서를 찾을 수 없습니다.",
+                "Report was not found.",
                 status_code=404,
             )
         self._ensure_report_ready(report)
@@ -218,30 +235,27 @@ class ReportService:
         )
 
     @staticmethod
-    def _overall_risk(severities: list[Severity]) -> Severity:
-        # TBD: Overall risk for a scan with zero findings is not specified.
+    def _overall_risk(severities: list[str]) -> str:
         if not severities:
-            return Severity.INFO
-        return max(severities, key=lambda severity: SEVERITY_RANK[severity])
+            return "low"
+        rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+        return max(severities, key=rank.__getitem__)
 
     @staticmethod
     def _ensure_report_ready(report) -> None:
-        if report is None:
+        if report is None or report.status in {
+            ReportStatus.PENDING,
+            ReportStatus.GENERATING,
+        }:
             raise AppError(
                 ErrorCode.REPORT_NOT_READY,
-                "AI 보고서가 아직 생성되지 않았습니다.",
-                status_code=409,
-            )
-        if report.status in {ReportStatus.PENDING, ReportStatus.GENERATING}:
-            raise AppError(
-                ErrorCode.REPORT_NOT_READY,
-                "AI 보고서가 아직 준비되지 않았습니다.",
+                "AI report is not ready.",
                 status_code=409,
             )
         if report.status == ReportStatus.FAILED:
             raise AppError(
                 ErrorCode.REPORT_GENERATION_FAILED,
-                "보고서 생성에 실패했습니다.",
+                "Report generation failed.",
                 status_code=500,
             )
 
@@ -249,6 +263,6 @@ class ReportService:
     def _pdf_not_found() -> None:
         raise AppError(
             ErrorCode.REPORT_FILE_NOT_FOUND,
-            "PDF 보고서 파일을 찾을 수 없습니다.",
+            "PDF report file was not found.",
             status_code=404,
         )

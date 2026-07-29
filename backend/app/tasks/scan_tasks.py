@@ -29,7 +29,11 @@ async def run_scan_task(scan_id: uuid.UUID | str) -> None:
             scanner = (
                 MockScannerClient()
                 if settings.use_mock_integrations
-                else HTTPScannerClient(settings.scanner_base_url)
+                else HTTPScannerClient(
+                    settings.scanner_base_url,
+                    service_token=settings.internal_service_token,
+                    timeout_seconds=settings.integration_timeout_seconds,
+                )
             )
             artifact_repository = ArtifactRepository(session)
             orchestrator = ScanOrchestrator(

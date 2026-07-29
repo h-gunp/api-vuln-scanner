@@ -19,6 +19,7 @@ from app.repositories.scan_repository import ScanRepository
 from app.repositories.scan_step_repository import ScanStepRepository
 from app.schemas.callback import CallbackAccepted, ProgressCallback
 from app.schemas.contracts.normalized_api_graph import NormalizedAPIGraph
+from app.schemas.contracts.target_profile import TargetProfile
 from app.services.artifact_service import ArtifactService
 from app.services.artifact_validation_service import ArtifactValidationService
 from app.services.operation_service import OperationService
@@ -125,7 +126,20 @@ class ScannerCallbackService:
             scanner_job.status = JobStatus.COMPLETED
             scanner_job.completed_at = datetime.now(UTC)
             await self.jobs.flush()
-        submission = await self.llm.request_relationship_analysis(graph)
+        profile_json = await self.artifacts.read_latest_json(
+            scan_id,
+            ArtifactType.TARGET_PROFILE,
+        )
+        if profile_json is None:
+            raise AppError(
+                ErrorCode.TARGET_PROFILE_INVALID,
+                "Target Profile artifact is missing.",
+                status_code=409,
+            )
+        submission = await self.llm.request_relationship_analysis(
+            TargetProfile.model_validate(profile_json),
+            graph,
+        )
         await self.jobs.add(
             ExternalJob(
                 scan_id=scan_id,

@@ -62,6 +62,7 @@ class FindingService:
                 FindingListItem(
                     finding_id=finding.id,
                     module_id=finding.module_id,
+                    vulnerability_type=finding.vulnerability_type,
                     severity=finding.severity,
                     target_endpoint=FindingEndpoint(
                         operation_id=operation.operation_id,
@@ -97,6 +98,7 @@ class FindingService:
         return FindingDetailResponse(
             finding_id=finding.id,
             module_id=finding.module_id,
+            vulnerability_type=finding.vulnerability_type,
             severity=finding.severity,
             target_endpoint=FindingEndpoint(
                 operation_id=operation.operation_id,

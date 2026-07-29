@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.report import Report
+from app.core.enums import ReportStatus
 
 
 class ReportRepository:
@@ -24,6 +25,20 @@ class ReportRepository:
             .where(Report.scan_id == scan_id)
             .order_by(Report.created_at.desc())
             .limit(1)
+        )
+        return await self.session.scalar(statement)
+
+    async def latest_for_scan_and_status(
+        self,
+        scan_id: uuid.UUID,
+        status: ReportStatus,
+    ) -> Report | None:
+        statement = (
+            select(Report)
+            .where(Report.scan_id == scan_id, Report.status == status)
+            .order_by(Report.created_at.desc())
+            .limit(1)
+            .with_for_update()
         )
         return await self.session.scalar(statement)
 

@@ -2,33 +2,32 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from app.core.enums import Severity
-from app.schemas.common import APIModel
+from app.schemas.common import ArtifactModel
+
+ReportSeverity = Literal["low", "medium", "high", "critical"]
 
 
-class AIReportFinding(APIModel):
+class AIReportFinding(ArtifactModel):
     finding_id: str
     analysis_id: str
     root_cause: str
-    attack_flow: list[str] = Field(default_factory=list)
+    attack_flow: list[str] = Field(min_length=1)
     impact: str
     recommendation: str
-    severity: Severity
-    # TODO: Evidence contract pending.
-    evidence_refs: list[str] = Field(default_factory=list)
+    severity: ReportSeverity
+    evidence_refs: list[str]
 
 
-class AIReport(APIModel):
+class AIReport(ArtifactModel):
     schema_version: Literal["1.2"] = "1.2"
-    report_id: str
     scan_id: str
     model_name: str
     prompt_version: str
-    prompt_sha256: str
-    overall_risk: Severity
+    prompt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    overall_risk: ReportSeverity
     overall_risk_basis: Literal["rule:max_verified_severity"]
     summary: str
-    findings: list[AIReportFinding] = Field(default_factory=list)
+    findings: list[AIReportFinding]
 
     @model_validator(mode="after")
     def finding_ids_are_unique(self) -> "AIReport":

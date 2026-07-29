@@ -37,7 +37,7 @@ class ArtifactService:
         scan_id: uuid.UUID,
         artifact_type: ArtifactType,
         value: dict[str, Any],
-        schema_version: str,
+        schema_version: str | None,
     ) -> tuple[ScanArtifact, bool]:
         content = json_bytes(value)
         return await self._store(
@@ -100,7 +100,7 @@ class ArtifactService:
         if duplicate:
             return duplicate, False
         previous = await self.repository.latest_by_type(scan_id, artifact_type)
-        if previous:
+        if previous and artifact_type != ArtifactType.EVIDENCE:
             # Raw artifacts are immutable. A correction/versioning contract is not yet defined.
             raise AppError(
                 ErrorCode.ARTIFACT_STORAGE_FAILED,
@@ -109,7 +109,15 @@ class ArtifactService:
                 details={"artifact_type": artifact_type.value},
             )
 
-        relative_path = self.relative_path(scan_id, artifact_type)
+        relative_path = (
+            Path("scans")
+            / str(scan_id)
+            / "results"
+            / "evidence"
+            / f"{checksum}.json"
+            if artifact_type == ArtifactType.EVIDENCE
+            else self.relative_path(scan_id, artifact_type)
+        )
         try:
             await self.storage.write_atomic(relative_path, content)
             artifact = ScanArtifact(
