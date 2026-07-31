@@ -548,7 +548,7 @@ class HttpBackendClient:
         client: httpx.Client | None = None,
     ) -> None:
         self._settings = settings
-        self._client = client or httpx.Client()
+        self._client = client or httpx.Client(trust_env=False)
         self._owns_client = client is None
 
     def close(self) -> None:
