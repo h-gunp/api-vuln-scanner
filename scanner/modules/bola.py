@@ -152,14 +152,19 @@ class BolaModule:
                 evidence=evidence,
                 reason_code="BOLA_FOREIGN_OBJECT_REJECTED",
             )
-        if variant.json_body is None:
+        variant_body = (
+            variant.runtime_json_body.reveal()
+            if variant.runtime_json_body is not None
+            else variant.json_body
+        )
+        if variant_body is None:
             return _inconclusive("BOLA_RESPONSE_NOT_JSON", evidence)
         if not variant.is_success:
             return _inconclusive("BOLA_VARIANT_FAILED", evidence)
 
         matches = _foreign_object_matches(
             selected_foreign_values,
-            variant.json_body,
+            variant_body,
             sensitive_values=context.runtime.sensitive_values(),
         )
         if not matches:
@@ -296,6 +301,8 @@ def _scalar_fields(
 
 def _is_identifying_path(path: tuple[str, ...], object_type: str) -> bool:
     terminal = path[-1].casefold()
+    if object_type.casefold() == "account" and terminal == "account_number":
+        return True
     expected = f"{object_type}_id".casefold()
     if terminal == expected:
         return True

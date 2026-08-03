@@ -75,6 +75,16 @@ class ScannerCallbackService:
         )
         if "api_count" in payload.metrics:
             scan.api_count = max(scan.api_count, int(payload.metrics["api_count"]))
+        requests_used = payload.metrics.get("requests_used")
+        if requests_used is not None:
+            requested_total = int(requests_used)
+            if requested_total > scan.max_requests:
+                raise AppError(
+                    ErrorCode.SCAN_BUDGET_EXCEEDED,
+                    "Scanner exceeded the scan request budget.",
+                    status_code=422,
+                )
+            scan.requests_used = max(scan.requests_used, requested_total)
 
         step = await self.steps.latest(scan_id, payload.stage)
         if step is None:

@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,7 +16,9 @@ class Settings(BaseSettings):
     )
 
     app_env: Literal["development", "test", "production"] = "development"
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/security_scanner"
+    database_url: str = (
+        "postgresql+asyncpg://postgres:postgres@localhost:5432/security_scanner"
+    )
     redis_url: str = "redis://localhost:6379/0"
     artifact_root: Path = Path("artifacts")
 
@@ -26,6 +29,7 @@ class Settings(BaseSettings):
     task_mode: Literal["background", "arq", "disabled"] = "background"
 
     allow_private_targets: bool = False
+    target_login_path: str = "/api/login"
     target_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     max_requests: int = Field(default=300, gt=0)
     requests_per_second: int = Field(default=3, gt=0)
@@ -50,6 +54,27 @@ class Settings(BaseSettings):
     def require_async_postgres_driver(cls, value: str) -> str:
         if not value.startswith("postgresql+asyncpg://"):
             raise ValueError("DATABASE_URL must use postgresql+asyncpg")
+        return value
+
+    @field_validator("target_login_path")
+    @classmethod
+    def validate_target_login_path(cls, value: str) -> str:
+        value = value.strip()
+        parsed = urlsplit(value)
+
+        if (
+            not value.startswith("/")
+            or value.startswith("//")
+            or parsed.scheme
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or ".." in parsed.path.split("/")
+        ):
+            raise ValueError(
+                "TARGET_LOGIN_PATH must be a safe relative path starting with '/'"
+            )
+
         return value
 
     @field_validator("cors_allowed_origins")

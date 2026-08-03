@@ -351,6 +351,34 @@ def test_collect_response_keeps_object_ids_and_examples_private():
         TypeAdapter(RuntimeContext).dump_json(runtime)
 
 
+def test_collect_response_supports_bola_number_and_collection_identifiers():
+    profile, manager, _ = make_manager(lambda request: httpx.Response(200))
+    runtime = RuntimeContext(scan_id=profile.scan_id)
+
+    manager.collect_response(
+        runtime,
+        actor_id="user_b",
+        operation_id="GET:/api/overview",
+        body={
+            "account_number": "1100000002",
+            "cards": [{"id": 22}],
+            "payments": [{"id": 33}],
+            "items": [{"id": 999}],
+        },
+    )
+
+    assert runtime.object_ids["user_b"]["account"] == {"1100000002"}
+    assert runtime.object_ids["user_b"]["card"] == {"22"}
+    assert runtime.object_ids["user_b"]["payment"] == {"33"}
+    assert all(
+        "999" not in values
+        for values in runtime.object_ids["user_b"].values()
+    )
+    assert "1100000002" not in repr(runtime)
+    assert "22" not in repr(runtime)
+    assert "33" not in repr(runtime)
+
+
 def test_actor_session_hides_cookie_and_token_from_repr_and_serialization():
     session = ActorSession(
         actor_id="user_a",

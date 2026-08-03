@@ -22,6 +22,7 @@ class TargetProfileService:
         parsed = urlsplit(target_url)
         base_path = parsed.path.rstrip("/")
         allowed_pattern = f"{base_path}/*" if base_path else "/*"
+
         return TargetProfile(
             scan_id=str(scan_id),
             target=TargetScope(
@@ -36,11 +37,14 @@ class TargetProfileService:
             authentication=AuthenticationConfig(
                 login=LoginConfig(
                     method="POST",
-                    path="/api/login",
+                    path=self.settings.target_login_path,
                     content_type="application/json",
                     username_field="username",
                     password_field="password",
-                    session=SessionConfig(type="bearer", token_field="token"),
+                    session=SessionConfig(
+                        type="bearer",
+                        token_field="token",
+                    ),
                 ),
                 actors=[
                     ActorConfig(
@@ -60,7 +64,10 @@ class TargetProfileService:
                 requests_per_second=self.settings.requests_per_second,
                 state_change_policy="deny",
                 # TODO: Final module ID/category mapping contract pending.
-                approved_modules=["authz", "input_validation", "data_exposure"],
+                approved_modules=[
+                    "authz",
+                    "input_validation",
+                    "data_exposure",
+                ],
             ),
         )
-

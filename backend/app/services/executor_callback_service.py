@@ -76,6 +76,7 @@ class ExecutorCallbackService:
     ) -> CallbackAccepted:
         scan = await self._get_scan(scan_id)
         if payload.stage not in {
+            ScanStage.PLAN_VALIDATION,
             ScanStage.MODULE_EXECUTION,
             ScanStage.RESULT_VALIDATION,
         }:

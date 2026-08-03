@@ -87,6 +87,44 @@ def account_step(*, owner: str = "user_b", method: str = "GET") -> ScanStep:
     )
 
 
+def account_number_operation() -> Operation:
+    return Operation(
+        operation_id="GET:/api/transactions",
+        method="GET",
+        path_template="/api/transactions",
+        inputs=[
+            InputField(
+                location="query",
+                field_path="account_number",
+                type="string",
+            )
+        ],
+        outputs=[],
+    )
+
+
+def account_number_step() -> ScanStep:
+    return ScanStep(
+        order=1,
+        candidate_id="candidate-account-number",
+        module_id="BOLA-001",
+        target_operation_id="GET:/api/transactions",
+        target_endpoint=TargetEndpoint(
+            method="GET",
+            path_template="/api/transactions",
+        ),
+        input_bindings=[
+            InputBinding(
+                parameter="account_number",
+                location="query",
+                binding_type="object_binding",
+                object_type="account",
+                owner="user_b",
+            )
+        ],
+    )
+
+
 def discovered_runtime() -> RuntimeContext:
     runtime = RuntimeContext(
         scan_id="scan-001",
@@ -107,6 +145,30 @@ def discovered_runtime() -> RuntimeContext:
         actor_id="user_b",
         operation_id="GET:/api/accounts",
         body={"account_id": "acct-b-1"},
+    )
+    return runtime
+
+
+def discovered_account_number_runtime() -> RuntimeContext:
+    runtime = RuntimeContext(
+        scan_id="scan-001",
+        sessions={
+            "user_a": ActorSession(actor_id="user_a", token="token-a"),
+            "user_b": ActorSession(actor_id="user_b", token="token-b"),
+        },
+    )
+    collector = SessionManager(cast(SafeHttpClient, None))
+    collector.collect_response(
+        runtime,
+        actor_id="user_a",
+        operation_id="GET:/api/transactions",
+        body={"account_number": "1100000001"},
+    )
+    collector.collect_response(
+        runtime,
+        actor_id="user_b",
+        operation_id="GET:/api/transactions",
+        body={"account_number": "1100000002"},
     )
     return runtime
 
@@ -167,6 +229,54 @@ def test_bola_verifies_only_when_variant_returns_identifiable_user_b_data():
     assert "acct-a-1" not in repr(outcome)
     assert "acct-b-1" not in repr(outcome.evidence)
     assert "token-a" not in repr(outcome.evidence)
+
+
+def test_bola_verifies_foreign_account_number_in_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        account_number = request.url.params["account_number"]
+        return httpx.Response(
+            200,
+            json={
+                "account_number": account_number,
+                "transactions": [],
+            },
+        )
+
+    outcome = BolaModule().run(
+        execution_context(
+            handler,
+            runtime=discovered_account_number_runtime(),
+            operation=account_number_operation(),
+            step=account_number_step(),
+        )
+    )
+
+    assert outcome.verdict is ModuleVerdict.VERIFIED
+    assert outcome.conditions == ("BOLA_FOREIGN_OBJECT_RETURNED",)
+    assert [field.field_path for field in outcome.affected_fields] == [
+        "account_number"
+    ]
+
+
+def test_bola_does_not_treat_unrelated_number_as_account_identifier():
+    def handler(request: httpx.Request) -> httpx.Response:
+        account_number = request.url.params["account_number"]
+        return httpx.Response(
+            200,
+            json={"reference_number": account_number},
+        )
+
+    outcome = BolaModule().run(
+        execution_context(
+            handler,
+            runtime=discovered_account_number_runtime(),
+            operation=account_number_operation(),
+            step=account_number_step(),
+        )
+    )
+
+    assert outcome.verdict is ModuleVerdict.NOT_FOUND
+    assert outcome.reason_code == "BOLA_FOREIGN_OBJECT_NOT_IDENTIFIED"
 
 
 @pytest.mark.parametrize("status_code", [401, 403, 404])

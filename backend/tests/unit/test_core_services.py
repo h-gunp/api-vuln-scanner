@@ -14,14 +14,17 @@ from app.core.enums import (
 )
 from app.core.exceptions import AppError
 from app.models.scan import Scan
+from app.schemas.callback import ProgressCallback
 from app.schemas.contracts.normalized_api_graph import NormalizedAPIGraph
 from app.schemas.contracts.relationship_analysis import RelationshipAnalysis
 from app.schemas.contracts.scan_plan import ScanPlan
 from app.services.artifact_service import ArtifactService
+from app.services.executor_callback_service import ExecutorCallbackService
 from app.services.masking_service import MaskingService
 from app.services.plan_validation_service import PlanValidationService
 from app.services.progress_service import ProgressService
 from app.services.report_service import ReportService
+from app.services.scanner_callback_service import ScannerCallbackService
 from app.services.target_health_service import TargetHealthService
 from app.services.target_profile_service import TargetProfileService
 from app.storage.local import LocalStorage
@@ -69,6 +72,85 @@ def test_non_completed_scan_progress_is_capped_at_99() -> None:
     assert scan.progress == 99
 
 
+@pytest.mark.asyncio
+async def test_executor_progress_accepts_plan_validation_stage() -> None:
+    scan_id = uuid.uuid4()
+    scan = Scan(
+        id=scan_id,
+        target_url="https://example.com",
+        status=ScanStatus.RUNNING,
+        stage=ScanStage.PLAN_VALIDATION,
+        progress=99,
+    )
+    scans = AsyncMock()
+    scans.get_for_update.return_value = scan
+    service = ExecutorCallbackService(
+        scans=scans,
+        operations=AsyncMock(),
+        findings=AsyncMock(),
+        artifacts=AsyncMock(),
+        validator=AsyncMock(),
+        progress=ProgressService(),
+        reports=AsyncMock(),
+        jobs=AsyncMock(),
+        llm=AsyncMock(),
+    )
+
+    response = await service.record_progress(
+        scan_id,
+        ProgressCallback(
+            stage=ScanStage.PLAN_VALIDATION,
+            progress=5,
+            metrics={},
+        ),
+    )
+
+    assert response.accepted is True
+    assert scan.stage == ScanStage.PLAN_VALIDATION
+    assert scan.progress == 99
+    scans.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scanner_progress_persists_discovery_request_count() -> None:
+    scan_id = uuid.uuid4()
+    scan = Scan(
+        id=scan_id,
+        target_url="https://example.com",
+        status=ScanStatus.RUNNING,
+        stage=ScanStage.API_DISCOVERY,
+        progress=45,
+        requests_used=0,
+        max_requests=300,
+    )
+    scans = AsyncMock()
+    scans.get_for_update.return_value = scan
+    steps = AsyncMock()
+    steps.latest.return_value = None
+    service = ScannerCallbackService(
+        scans=scans,
+        steps=steps,
+        artifacts=AsyncMock(),
+        operations=AsyncMock(),
+        progress=ProgressService(),
+        validator=AsyncMock(),
+        jobs=AsyncMock(),
+        llm=AsyncMock(),
+    )
+
+    await service.record_progress(
+        scan_id,
+        ProgressCallback(
+            stage=ScanStage.API_NORMALIZATION,
+            progress=85,
+            metrics={"requests_used": 225},
+        ),
+    )
+
+    assert scan.requests_used == 225
+    scans.flush.assert_awaited_once()
+
+
 def test_target_profile_uses_environment_variable_names_only(tmp_path: Path) -> None:
     settings = Settings(
         database_url="postgresql+asyncpg://postgres:postgres@localhost/scanner",
@@ -84,6 +166,67 @@ def test_target_profile_uses_environment_variable_names_only(tmp_path: Path) -> 
     assert profile.authentication.actors[0].password_env == "USER_A_PASSWORD"
     serialized = profile.model_dump_json()
     assert "actual-password" not in serialized
+
+def test_target_profile_login_path_defaults_to_api_login(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TARGET_LOGIN_PATH", raising=False)
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://postgres:postgres@localhost/scanner",
+        artifact_root=tmp_path,
+    )
+    profile = TargetProfileService(settings).build(
+        uuid.uuid4(),
+        "https://example.com",
+    )
+
+    assert profile.authentication.login.path == "/api/login"
+
+
+def test_target_profile_supports_configurable_login_path(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+asyncpg://postgres:postgres@localhost/scanner",
+        artifact_root=tmp_path,
+        target_login_path="/login",
+    )
+    profile = TargetProfileService(settings).build(
+        uuid.uuid4(),
+        "https://example.com",
+    )
+
+    assert profile.authentication.login.path == "/login"
+
+
+@pytest.mark.parametrize(
+    "invalid_path",
+    [
+        "login",
+        "//evil.example/login",
+        "https://evil.example/login",
+        "/login?next=/admin",
+        "/login#fragment",
+        "/../admin",
+    ],
+)
+def test_target_login_path_rejects_unsafe_values(
+    tmp_path: Path,
+    invalid_path: str,
+) -> None:
+    with pytest.raises(ValueError):
+        Settings(
+            _env_file=None,
+            database_url=(
+                "postgresql+asyncpg://postgres:postgres@localhost/scanner"
+            ),
+            artifact_root=tmp_path,
+            target_login_path=invalid_path,
+        )
 
 
 def test_url_validation_and_private_ip_detection() -> None:

@@ -1,0 +1,597 @@
+{
+  "schema_version": "1.1",
+  "scan_id": "f36c3cf8-f1ad-46da-bb8a-026a17ab3964",
+  "operations": [
+    {
+      "operation_id": "GET:/",
+      "method": "GET",
+      "path_template": "/",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/ai/system-info",
+      "method": "GET",
+      "path_template": "/api/ai/system-info",
+      "inputs": [],
+      "outputs": [
+        {
+          "field_path": "demo_attacks",
+          "type": "array"
+        },
+        {
+          "field_path": "endpoints",
+          "type": "object"
+        },
+        {
+          "field_path": "endpoints.anonymous_chat",
+          "type": "string"
+        },
+        {
+          "field_path": "endpoints.authenticated_chat",
+          "type": "string"
+        },
+        {
+          "field_path": "endpoints.system_info",
+          "type": "string"
+        },
+        {
+          "field_path": "modes",
+          "type": "object"
+        },
+        {
+          "field_path": "modes.anonymous",
+          "type": "string"
+        },
+        {
+          "field_path": "modes.authenticated",
+          "type": "string"
+        },
+        {
+          "field_path": "status",
+          "type": "string"
+        },
+        {
+          "field_path": "system_info",
+          "type": "object"
+        },
+        {
+          "field_path": "system_info.api_key_configured",
+          "type": "boolean"
+        },
+        {
+          "field_path": "system_info.api_provider",
+          "type": "string"
+        },
+        {
+          "field_path": "system_info.api_url",
+          "type": "string"
+        },
+        {
+          "field_path": "system_info.database_access",
+          "type": "boolean"
+        },
+        {
+          "field_path": "system_info.model",
+          "type": "string"
+        },
+        {
+          "field_path": "system_info.security_issues",
+          "type": "array"
+        },
+        {
+          "field_path": "system_info.system_prompt",
+          "type": "string"
+        },
+        {
+          "field_path": "system_info.vulnerabilities",
+          "type": "array"
+        },
+        {
+          "field_path": "vulnerabilities",
+          "type": "array"
+        }
+      ]
+    },
+    {
+      "operation_id": "GET:/api/bill-categories",
+      "method": "GET",
+      "path_template": "/api/bill-categories",
+      "inputs": [],
+      "outputs": [
+        {
+          "field_path": "categories",
+          "type": "array"
+        },
+        {
+          "field_path": "categories[].description",
+          "type": "string"
+        },
+        {
+          "field_path": "categories[].id",
+          "type": "integer"
+        },
+        {
+          "field_path": "categories[].name",
+          "type": "string"
+        },
+        {
+          "field_path": "status",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "operation_id": "GET:/api/bill-payments/history",
+      "method": "GET",
+      "path_template": "/api/bill-payments/history",
+      "inputs": [],
+      "outputs": [
+        {
+          "field_path": "payments",
+          "type": "array"
+        },
+        {
+          "field_path": "payments[].amount",
+          "type": "number"
+        },
+        {
+          "field_path": "payments[].biller_name",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].card_number",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].category_name",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].created_at",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].description",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].id",
+          "type": "integer"
+        },
+        {
+          "field_path": "payments[].payment_method",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].processed_at",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].reference",
+          "type": "string"
+        },
+        {
+          "field_path": "payments[].status",
+          "type": "string"
+        },
+        {
+          "field_path": "status",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "operation_id": "GET:/api/billers/by-category/{category_id}",
+      "method": "GET",
+      "path_template": "/api/billers/by-category/{category_id}",
+      "inputs": [
+        {
+          "location": "path",
+          "field_path": "category_id",
+          "type": "integer"
+        }
+      ],
+      "outputs": [
+        {
+          "field_path": "billers",
+          "type": "array"
+        },
+        {
+          "field_path": "billers[].account_number",
+          "type": "string"
+        },
+        {
+          "field_path": "billers[].description",
+          "type": "string"
+        },
+        {
+          "field_path": "billers[].id",
+          "type": "integer"
+        },
+        {
+          "field_path": "billers[].maximum_amount",
+          "type": "number"
+        },
+        {
+          "field_path": "billers[].minimum_amount",
+          "type": "number"
+        },
+        {
+          "field_path": "billers[].name",
+          "type": "string"
+        },
+        {
+          "field_path": "status",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "operation_id": "GET:/api/docs/",
+      "method": "GET",
+      "path_template": "/api/docs/",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/docs/index.css",
+      "method": "GET",
+      "path_template": "/api/docs/index.css",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/docs/swagger-ui-bundle.js",
+      "method": "GET",
+      "path_template": "/api/docs/swagger-ui-bundle.js",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/docs/swagger-ui-standalone-preset.js",
+      "method": "GET",
+      "path_template": "/api/docs/swagger-ui-standalone-preset.js",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/docs/swagger-ui.css",
+      "method": "GET",
+      "path_template": "/api/docs/swagger-ui.css",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/transactions",
+      "method": "GET",
+      "path_template": "/api/transactions",
+      "inputs": [
+        {
+          "location": "query",
+          "field_path": "account_number",
+          "type": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "field_path": "account_number",
+          "type": "string"
+        },
+        {
+          "field_path": "transactions",
+          "type": "array"
+        }
+      ]
+    },
+    {
+      "operation_id": "GET:/api/v1/merchants/me",
+      "method": "GET",
+      "path_template": "/api/v1/merchants/me",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/v1/payments",
+      "method": "GET",
+      "path_template": "/api/v1/payments",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/v1/payments/merchant_id/{merchant_id}",
+      "method": "GET",
+      "path_template": "/api/v1/payments/merchant_id/{merchant_id}",
+      "inputs": [
+        {
+          "location": "path",
+          "field_path": "merchant_id",
+          "type": "integer"
+        }
+      ],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/v1/payments/{payment_id}",
+      "method": "GET",
+      "path_template": "/api/v1/payments/{payment_id}",
+      "inputs": [
+        {
+          "location": "path",
+          "field_path": "payment_id",
+          "type": "integer"
+        }
+      ],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/api/virtual-cards",
+      "method": "GET",
+      "path_template": "/api/virtual-cards",
+      "inputs": [],
+      "outputs": [
+        {
+          "field_path": "cards",
+          "type": "array"
+        },
+        {
+          "field_path": "cards[].card_number",
+          "type": "string"
+        },
+        {
+          "field_path": "cards[].expiry_date",
+          "type": "string"
+        },
+        {
+          "field_path": "cards[].id",
+          "type": "integer"
+        },
+        {
+          "field_path": "status",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "operation_id": "GET:/api/virtual-cards/{card_id}/transactions",
+      "method": "GET",
+      "path_template": "/api/virtual-cards/{card_id}/transactions",
+      "inputs": [
+        {
+          "location": "path",
+          "field_path": "card_id",
+          "type": "integer"
+        }
+      ],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/blog",
+      "method": "GET",
+      "path_template": "/blog",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/careers",
+      "method": "GET",
+      "path_template": "/careers",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/cdn-cgi/l/email-protection",
+      "method": "GET",
+      "path_template": "/cdn-cgi/l/email-protection",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/cdn-cgi/scripts/5c5dd728/cloudflare-static/'+e.replace(/",
+      "method": "GET",
+      "path_template": "/cdn-cgi/scripts/5c5dd728/cloudflare-static/'+e.replace(/",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js",
+      "method": "GET",
+      "path_template": "/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/cdn-cgi/styles/cf.errors.css",
+      "method": "GET",
+      "path_template": "/cdn-cgi/styles/cf.errors.css",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/check_balance/{account_number}",
+      "method": "GET",
+      "path_template": "/check_balance/{account_number}",
+      "inputs": [
+        {
+          "location": "path",
+          "field_path": "account_number",
+          "type": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "field_path": "balance",
+          "type": "number"
+        },
+        {
+          "field_path": "username",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "operation_id": "GET:/compliance",
+      "method": "GET",
+      "path_template": "/compliance",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/forgot-password",
+      "method": "GET",
+      "path_template": "/forgot-password",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/internal/config.json",
+      "method": "GET",
+      "path_template": "/internal/config.json",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/internal/secret",
+      "method": "GET",
+      "path_template": "/internal/secret",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/latest/meta-data/",
+      "method": "GET",
+      "path_template": "/latest/meta-data/",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/latest/meta-data/iam/security-credentials/",
+      "method": "GET",
+      "path_template": "/latest/meta-data/iam/security-credentials/",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/latest/meta-data/iam/security-credentials/vulnbank-role",
+      "method": "GET",
+      "path_template": "/latest/meta-data/iam/security-credentials/vulnbank-role",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/login",
+      "method": "GET",
+      "path_template": "/login",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/merchant/login",
+      "method": "GET",
+      "path_template": "/merchant/login",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/merchant/register",
+      "method": "GET",
+      "path_template": "/merchant/register",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/privacy",
+      "method": "GET",
+      "path_template": "/privacy",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/register",
+      "method": "GET",
+      "path_template": "/register",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/static/auth.css",
+      "method": "GET",
+      "path_template": "/static/auth.css",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/static/merchant.js",
+      "method": "GET",
+      "path_template": "/static/merchant.js",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/static/style.css",
+      "method": "GET",
+      "path_template": "/static/style.css",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/static/vuln-disclaimer.js",
+      "method": "GET",
+      "path_template": "/static/vuln-disclaimer.js",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/sup3r_s3cr3t_admin",
+      "method": "GET",
+      "path_template": "/sup3r_s3cr3t_admin",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/terms",
+      "method": "GET",
+      "path_template": "/terms",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "operation_id": "GET:/transactions/{account_number}",
+      "method": "GET",
+      "path_template": "/transactions/{account_number}",
+      "inputs": [
+        {
+          "location": "path",
+          "field_path": "account_number",
+          "type": "string"
+        }
+      ],
+      "outputs": [
+        {
+          "field_path": "transactions",
+          "type": "array"
+        },
+        {
+          "field_path": "transactions[].amount",
+          "type": "number"
+        },
+        {
+          "field_path": "transactions[].from_account",
+          "type": "string"
+        },
+        {
+          "field_path": "transactions[].id",
+          "type": "integer"
+        },
+        {
+          "field_path": "transactions[].timestamp",
+          "type": "string"
+        },
+        {
+          "field_path": "transactions[].to_account",
+          "type": "string"
+        }
+      ]
+    }
+  ]
+}

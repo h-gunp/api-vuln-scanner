@@ -319,14 +319,17 @@ def discovery_transport(
     calls: list[tuple[str, str, str | None]],
     *,
     openapi_succeeds: bool = True,
+    openapi_path: str = "/openapi.json",
 ):
     def handler(request: httpx.Request) -> httpx.Response:
         body: dict[str, str] = {}
         if request.content:
             body = json.loads(request.content)
+
         calls.append(
             (request.method, request.url.path, body.get("username"))
         )
+
         if request.method == "POST" and request.url.path == "/api/login":
             actor = body["username"][-1]
             return httpx.Response(
@@ -334,8 +337,14 @@ def discovery_transport(
                 json={"access_token": f"token-{actor}"},
                 request=request,
             )
-        if request.url.path == "/openapi.json" and openapi_succeeds:
-            return httpx.Response(200, json=openapi_document(), request=request)
+
+        if request.url.path == openapi_path and openapi_succeeds:
+            return httpx.Response(
+                200,
+                json=openapi_document(),
+                request=request,
+            )
+
         if request.url.path == "/api/accounts":
             authorization = request.headers["authorization"]
             actor = authorization[-1]
@@ -351,7 +360,12 @@ def discovery_transport(
                 },
                 request=request,
             )
-        return httpx.Response(404, json={"detail": "not found"}, request=request)
+
+        return httpx.Response(
+            404,
+            json={"detail": "not found"},
+            request=request,
+        )
 
     return httpx.MockTransport(handler)
 
@@ -508,8 +522,8 @@ def test_discovery_orchestrates_sources_collection_artifact_and_progress() -> No
         ScannerStage.PROFILE_LOADING,
         ScannerStage.AUTHENTICATING,
         ScannerStage.DISCOVERING,
-        ScannerStage.NORMALIZING,
         ScannerStage.OBJECT_DISCOVERY,
+        ScannerStage.NORMALIZING,
         ScannerStage.COMPLETED,
     ]
     assert [event.progress for event in backend.progress_events] == sorted(
@@ -813,6 +827,43 @@ def test_same_scan_new_job_budget_checks_current_job_cancellation() -> None:
         for event in backend.progress_events
     )
     assert scanner.audit_events[-1].code == "DISCOVERY_CANCELLED"
+
+def test_configured_static_openapi_candidate_is_discovered() -> None:
+    backend = RecordingBackend()
+    calls: list[tuple[str, str, str | None]] = []
+
+    scanner = Scanner(
+        backend,
+        transport=discovery_transport(
+            calls,
+            openapi_path="/static/openapi.json",
+        ),
+        openapi_path_candidates=(
+            *OPENAPI_PATH_CANDIDATES,
+            "/static/openapi.json",
+        ),
+    )
+
+    outcome = scanner.run_discovery(
+        request_for(
+            ContractSource(
+                inline=profile_payload(
+                    sources=["openapi"],
+                    allowed_paths=[
+                        "/static/openapi.json",
+                        "/api/*",
+                    ],
+                )
+            )
+        )
+    )
+
+    assert (
+        "GET",
+        "/static/openapi.json",
+        None,
+    ) in calls
+    assert outcome.graph.operations
 
 
 def test_openapi_success_and_katana_failure_completes_with_warning() -> None:

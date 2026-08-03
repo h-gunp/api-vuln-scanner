@@ -68,6 +68,35 @@ OPENAPI_PATH_CANDIDATES = (
     "/api/swagger.json",
 )
 
+
+def validate_openapi_path_candidates(
+    candidates: tuple[str, ...],
+) -> tuple[str, ...]:
+    validated: list[str] = []
+
+    for candidate in candidates:
+        path = candidate.strip()
+        parsed = urlsplit(path)
+
+        if (
+            not path.startswith("/")
+            or path.startswith("//")
+            or parsed.scheme
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or ".." in parsed.path.split("/")
+        ):
+            raise ValueError(
+                "OpenAPI candidate paths must be safe relative paths "
+                "starting with '/'"
+            )
+
+        if path not in validated:
+            validated.append(path)
+
+    return tuple(validated)
+
 _HEX_SEGMENT = re.compile(r"^[0-9a-fA-F]{16,}$")
 _LIVE_FIELD_COMPONENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NUMERIC_SEGMENT = re.compile(r"^\d+$")
@@ -82,8 +111,8 @@ _PROGRESS = {
     ScannerStage.PROFILE_LOADING: 5,
     ScannerStage.AUTHENTICATING: 20,
     ScannerStage.DISCOVERING: 45,
-    ScannerStage.NORMALIZING: 65,
-    ScannerStage.OBJECT_DISCOVERY: 85,
+    ScannerStage.OBJECT_DISCOVERY: 65,
+    ScannerStage.NORMALIZING: 85,
     ScannerStage.POLICY_VALIDATION: 70,
     ScannerStage.EXECUTING: 80,
     ScannerStage.VERIFYING: 90,
@@ -210,17 +239,26 @@ class Scanner:
         katana_runner: KatanaRunner | None = None,
         artifact_builder: ArtifactBuilder | None = None,
         audit_sink: AuditSink | None = None,
+        openapi_path_candidates: tuple[str, ...] | None = None,
     ) -> None:
         resolved_audit_sink = (
             audit_sink if audit_sink is not None else InMemoryAuditSink()
         )
+
         self._backend = backend_client
         self._transport = transport
         self._katana_runner = katana_runner or KatanaRunner(
             audit_sink=resolved_audit_sink
         )
-        self._artifact_builder = artifact_builder or ArtifactBuilder(Redactor())
+        self._artifact_builder = artifact_builder or ArtifactBuilder(
+            Redactor()
+        )
         self._audit_sink = resolved_audit_sink
+        self._openapi_path_candidates = validate_openapi_path_candidates(
+            OPENAPI_PATH_CANDIDATES
+            if openapi_path_candidates is None
+            else openapi_path_candidates
+        )
         self._scan_states: dict[str, _ScanState] = {}
 
     def __repr__(self) -> str:
@@ -328,11 +366,6 @@ class Scanner:
             )
 
         self._check_cancellation(request, cancellation)
-        self._progress(
-            request,
-            ScannerStage.NORMALIZING,
-            {"requests_used": budget.requests_used},
-        )
         graph = normalize_openapi(request.scan_id, openapi_document, runtime)
         graph = self._filter_graph(graph, profile, policy, module_id)
         graph = merge_katana_records(graph, katana_records, runtime)
@@ -361,6 +394,11 @@ class Scanner:
         )
         graph = self._sanitize_authoritative_structure(graph, runtime)
         self._check_cancellation(request, cancellation)
+        self._progress(
+            request,
+            ScannerStage.NORMALIZING,
+            {"requests_used": budget.requests_used},
+        )
         available_object_types = tuple(
             sorted(
                 {
@@ -590,11 +628,6 @@ class Scanner:
         )
         self._check_cancellation(request, cancellation)
         if decision.status is ApprovalStatus.REJECTED:
-            self._progress(
-                request,
-                ScannerStage.COMPLETED,
-                {"findings": 0, "requests_used": budget.requests_used},
-            )
             return ExecutionOutcome(
                 job_id=request.job_id,
                 scan_id=request.scan_id,
@@ -631,6 +664,15 @@ class Scanner:
             },
         )
         self._check_cancellation(request, cancellation)
+        self._progress(
+            request,
+            ScannerStage.COMPLETED,
+            {
+                "findings": len(result.findings),
+                "requests_used": budget.requests_used,
+            },
+        )
+        self._check_cancellation(request, cancellation)
         try:
             envelope = self._artifact_builder.build(
                 scan_id=request.scan_id,
@@ -661,15 +703,6 @@ class Scanner:
                 retryable=True,
                 message="execution result publish failed",
             )
-        self._check_cancellation(request, cancellation)
-        self._progress(
-            request,
-            ScannerStage.COMPLETED,
-            {
-                "findings": len(result.findings),
-                "requests_used": budget.requests_used,
-            },
-        )
         return ExecutionOutcome(
             job_id=request.job_id,
             scan_id=request.scan_id,
@@ -862,7 +895,7 @@ class Scanner:
         if "openapi" not in profile.discovery.sources or module_id is None:
             return {"openapi": "3.1.0", "paths": combined_paths}, False
 
-        for path in OPENAPI_PATH_CANDIDATES:
+        for path in self._openapi_path_candidates:
             self._check_cancellation(request, cancellation)
             url = self._target_url(profile, path)
             try:

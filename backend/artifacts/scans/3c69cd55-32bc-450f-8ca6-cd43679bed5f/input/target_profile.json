@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.1",
+  "scan_id": "3c69cd55-32bc-450f-8ca6-cd43679bed5f",
+  "target": {
+    "base_url": "https://vulnbank.org/",
+    "allowed_paths": [
+      "/*"
+    ],
+    "allowed_methods": [
+      "GET"
+    ]
+  },
+  "discovery": {
+    "sources": [
+      "openapi",
+      "crawl"
+    ],
+    "max_depth": 3
+  },
+  "authentication": {
+    "login": {
+      "method": "POST",
+      "path": "/login",
+      "content_type": "application/json",
+      "username_field": "username",
+      "password_field": "password",
+      "session": {
+        "type": "bearer",
+        "token_field": "token"
+      }
+    },
+    "actors": [
+      {
+        "actor_id": "user_a",
+        "username_env": "USER_A_USERNAME",
+        "password_env": "USER_A_PASSWORD"
+      },
+      {
+        "actor_id": "user_b",
+        "username_env": "USER_B_USERNAME",
+        "password_env": "USER_B_PASSWORD"
+      }
+    ]
+  },
+  "safety_policy": {
+    "max_requests": 300,
+    "requests_per_second": 3,
+    "state_change_policy": "deny",
+    "approved_modules": [
+      "authz",
+      "input_validation",
+      "data_exposure"
+    ]
+  }
+}

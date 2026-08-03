@@ -52,6 +52,59 @@ EXECUTION_PAYLOAD = {
     "scan_plan": {"artifact_ref": "artifacts/plan-001"},
 }
 
+def test_openapi_path_environment_uses_defaults_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SCANNER_EXTRA_OPENAPI_PATHS", raising=False)
+
+    assert scanner_api._openapi_path_candidates_from_env() == (
+        "/openapi.json",
+        "/swagger.json",
+        "/api/openapi.json",
+        "/api/swagger.json",
+    )
+
+
+def test_openapi_path_environment_appends_and_deduplicates_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SCANNER_EXTRA_OPENAPI_PATHS",
+        "/static/openapi.json,/openapi.json,/static/openapi.json",
+    )
+
+    assert scanner_api._openapi_path_candidates_from_env() == (
+        "/openapi.json",
+        "/swagger.json",
+        "/api/openapi.json",
+        "/api/swagger.json",
+        "/static/openapi.json",
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_path",
+    [
+        "openapi.json",
+        "//evil.example/openapi.json",
+        "https://evil.example/openapi.json",
+        "/openapi.json?token=secret",
+        "/openapi.json#fragment",
+        "/../openapi.json",
+    ],
+)
+def test_openapi_path_environment_rejects_unsafe_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_path: str,
+) -> None:
+    monkeypatch.setenv(
+        "SCANNER_EXTRA_OPENAPI_PATHS",
+        invalid_path,
+    )
+
+    with pytest.raises(ValueError):
+        scanner_api._openapi_path_candidates_from_env()
+
 
 class RecordingScanner:
     def __init__(

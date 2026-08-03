@@ -272,6 +272,11 @@ class LLMService:
                 )
             )
 
+        relationships = self._recover_identifier_relationships(
+            target,
+            graph,
+            relationships,
+        )
         approved_ids = [
             MODULE_MAP[category]
             for category in target.safety_policy.approved_modules
@@ -289,6 +294,119 @@ class LLMService:
             relationships=relationships,
             test_candidates=candidates,
         )
+
+    @classmethod
+    def _recover_identifier_relationships(
+        cls,
+        target: TargetProfile,
+        graph: NormalizedApiGraph,
+        relationships: list[Relationship],
+    ) -> list[Relationship]:
+        existing = {
+            cls._relationship_key(relationship)
+            for relationship in relationships
+        }
+        inferred: list[Relationship] = []
+        for target_operation in graph.operations:
+            if not cls._operation_in_scope(target, target_operation):
+                continue
+            for target_field in target_operation.inputs:
+                if target_field.location not in {"path", "query"}:
+                    continue
+                target_type = cls._input_object_type(
+                    target_field.field_path,
+                    target_operation.path_template,
+                )
+                if target_type is None:
+                    continue
+                for source_operation in graph.operations:
+                    if (
+                        source_operation.operation_id
+                        == target_operation.operation_id
+                        and target_field.location == "path"
+                    ):
+                        continue
+                    for source_field in source_operation.outputs:
+                        if source_field.type != target_field.type:
+                            continue
+                        if (
+                            cls._output_object_type(source_field.field_path)
+                            != target_type
+                        ):
+                            continue
+                        candidate = Relationship(
+                            relationship_id="rel-pending",
+                            source_operation_id=source_operation.operation_id,
+                            target_operation_id=target_operation.operation_id,
+                            source_field=source_field.field_path,
+                            target_parameter=target_field.field_path,
+                            target_parameter_location=target_field.location,
+                            relationship_type="id_flow",
+                            confidence=1.0,
+                        )
+                        key = cls._relationship_key(candidate)
+                        if key in existing:
+                            continue
+                        existing.add(key)
+                        inferred.append(candidate)
+
+        inferred.sort(key=cls._relationship_key)
+        return [
+            relationship.model_copy(
+                update={"relationship_id": f"rel-{index:03d}"}
+            )
+            for index, relationship in enumerate(
+                [*relationships, *inferred],
+                start=1,
+            )
+        ]
+
+    @staticmethod
+    def _relationship_key(relationship: Relationship) -> tuple[str, ...]:
+        return (
+            relationship.source_operation_id,
+            relationship.target_operation_id,
+            relationship.source_field or "",
+            relationship.target_parameter or "",
+            relationship.target_parameter_location or "",
+            relationship.relationship_type,
+        )
+
+    @classmethod
+    def _input_object_type(
+        cls,
+        field_path: str,
+        path_template: str,
+    ) -> str | None:
+        leaf = field_path.rsplit(".", 1)[-1].replace("[]", "").casefold()
+        if leaf == "account_number":
+            return "account"
+        if leaf.endswith("_id") and len(leaf) > 3:
+            return leaf[:-3]
+        if leaf == "id":
+            return cls._object_type(field_path, path_template)
+        return None
+
+    @classmethod
+    def _output_object_type(cls, field_path: str) -> str | None:
+        parts = field_path.split(".")
+        leaf = parts[-1].replace("[]", "").casefold()
+        if leaf == "account_number":
+            return "account"
+        if leaf.endswith("_id") and len(leaf) > 3:
+            return leaf[:-3]
+        if leaf != "id" or len(parts) < 2:
+            return None
+        container = parts[-2].replace("[]", "").casefold()
+        return cls._singularize(container)
+
+    @staticmethod
+    def _singularize(value: str) -> str:
+        if value.endswith("ies") and len(value) > 3:
+            return f"{value[:-3]}y"
+        if value.endswith("s") and len(value) > 1:
+            return value[:-1]
+        return value
 
     def _select_candidates(
         self,
@@ -628,7 +746,9 @@ class LLMService:
 
     @staticmethod
     def _object_type(parameter: str, path_template: str) -> str:
-        leaf = parameter.rsplit(".", 1)[-1].replace("[]", "")
+        leaf = parameter.rsplit(".", 1)[-1].replace("[]", "").casefold()
+        if leaf == "account_number":
+            return "account"
         if leaf.endswith("_id") and len(leaf) > 3:
             return leaf[:-3]
         segments = [
@@ -642,7 +762,11 @@ class LLMService:
     @staticmethod
     def _looks_like_identifier(field_path: str) -> bool:
         leaf = field_path.rsplit(".", 1)[-1].replace("[]", "").lower()
-        return leaf == "id" or leaf.endswith("_id")
+        return (
+            leaf == "id"
+            or leaf.endswith("_id")
+            or leaf == "account_number"
+        )
 
     @staticmethod
     def _operation_in_scope(

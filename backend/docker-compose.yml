@@ -13,6 +13,7 @@ services:
       USE_MOCK_INTEGRATIONS: ${USE_MOCK_INTEGRATIONS:-false}
       TASK_MODE: ${TASK_MODE:-background}
       ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-true}
+      TARGET_LOGIN_PATH: ${TARGET_LOGIN_PATH:-/api/login}
       INTERNAL_AUTH_ENABLED: ${INTERNAL_AUTH_ENABLED:-true}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-local-development-token}
       CORS_ALLOWED_ORIGINS: '["http://127.0.0.1:4173","http://localhost:4173"]'
@@ -35,6 +36,7 @@ services:
       dockerfile: scanner/Dockerfile
     environment:
       BACKEND_BASE_URL: http://backend:8000
+      SCANNER_EXTRA_OPENAPI_PATHS: ${SCANNER_EXTRA_OPENAPI_PATHS:-}
       INTERNAL_AUTH_ENABLED: ${INTERNAL_AUTH_ENABLED:-true}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-local-development-token}
       USER_A_USERNAME: ${USER_A_USERNAME:-}

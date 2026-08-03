@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from collections import deque
 from collections.abc import AsyncIterator, Callable
@@ -21,11 +22,29 @@ from scanner.integration.backend_client import (
     ScannerStage,
 )
 from scanner.policy import CancellationRequested
-from scanner.scanner import DiscoveryJobError, ExecutionJobError, Scanner
+from scanner.scanner import (
+    OPENAPI_PATH_CANDIDATES,
+    DiscoveryJobError,
+    ExecutionJobError,
+    Scanner,
+    validate_openapi_path_candidates,
+)
 
 
 _UNEXPECTED_ERROR_CODE = "SCANNER_UNEXPECTED_ERROR"
 _DEFAULT_MAX_WORKERS = 4
+
+def _openapi_path_candidates_from_env() -> tuple[str, ...]:
+    raw_extra_paths = os.getenv("SCANNER_EXTRA_OPENAPI_PATHS", "")
+    extra_paths = tuple(
+        path.strip()
+        for path in raw_extra_paths.split(",")
+        if path.strip()
+    )
+
+    return validate_openapi_path_candidates(
+        (*OPENAPI_PATH_CANDIDATES, *extra_paths)
+    )
 
 
 class JobRegistry:
@@ -217,7 +236,14 @@ def create_app(
     resolved_backend = backend
     if resolved_backend is None:
         resolved_backend = HttpBackendClient(BackendSettings.from_env())
-    resolved_scanner = scanner if scanner is not None else Scanner(resolved_backend)
+    resolved_scanner = (
+        scanner
+        if scanner is not None
+        else Scanner(
+            resolved_backend,
+            openapi_path_candidates=_openapi_path_candidates_from_env(),
+        )
+    )
     resolved_registry = registry if registry is not None else JobRegistry()
     scheduler = _KeyedJobScheduler(max_workers)
     runner = _BackgroundRunner(

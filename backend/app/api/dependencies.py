@@ -13,7 +13,10 @@ from app.services.scan_service import ScanService
 from app.services.target_profile_service import TargetProfileService
 from app.storage.local import LocalStorage
 
-DBSession = Annotated[AsyncSession, Depends(get_db_session)]
+DBSession = Annotated[
+    AsyncSession,
+    Depends(get_db_session, scope="function"),
+]
 AppSettings = Annotated[Settings, Depends(get_settings)]
 
 

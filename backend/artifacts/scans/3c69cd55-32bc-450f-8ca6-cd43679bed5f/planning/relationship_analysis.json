@@ -1,0 +1,490 @@
+{
+  "schema_version": "1.2",
+  "scan_id": "3c69cd55-32bc-450f-8ca6-cd43679bed5f",
+  "model_name": "gpt-4o-mini-2024-07-18",
+  "prompt_version": "rel-v2",
+  "prompt_sha256": "bb384bf9f591b7eaae06a279a1001b8097f273ac036fbeb013f36419b700d762",
+  "approved_module_ids": [
+    "BOLA-001",
+    "INPUT-001",
+    "DATA-001"
+  ],
+  "relationships": [
+    {
+      "relationship_id": "rel-001",
+      "source_operation_id": "GET:/api/bill-categories",
+      "target_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "source_field": "categories[].id",
+      "target_parameter": "category_id",
+      "target_parameter_location": "path",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-002",
+      "source_operation_id": "GET:/api/bill-payments/history",
+      "target_operation_id": "GET:/api/v1/payments/{payment_id}",
+      "source_field": "payments[].id",
+      "target_parameter": "payment_id",
+      "target_parameter_location": "path",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-003",
+      "source_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "target_operation_id": "GET:/api/transactions",
+      "source_field": "billers[].account_number",
+      "target_parameter": "account_number",
+      "target_parameter_location": "query",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-004",
+      "source_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "target_operation_id": "GET:/check_balance/{account_number}",
+      "source_field": "billers[].account_number",
+      "target_parameter": "account_number",
+      "target_parameter_location": "path",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-005",
+      "source_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "target_operation_id": "GET:/transactions/{account_number}",
+      "source_field": "billers[].account_number",
+      "target_parameter": "account_number",
+      "target_parameter_location": "path",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-006",
+      "source_operation_id": "GET:/api/transactions",
+      "target_operation_id": "GET:/api/transactions",
+      "source_field": "account_number",
+      "target_parameter": "account_number",
+      "target_parameter_location": "query",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-007",
+      "source_operation_id": "GET:/api/transactions",
+      "target_operation_id": "GET:/check_balance/{account_number}",
+      "source_field": "account_number",
+      "target_parameter": "account_number",
+      "target_parameter_location": "path",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-008",
+      "source_operation_id": "GET:/api/transactions",
+      "target_operation_id": "GET:/transactions/{account_number}",
+      "source_field": "account_number",
+      "target_parameter": "account_number",
+      "target_parameter_location": "path",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    },
+    {
+      "relationship_id": "rel-009",
+      "source_operation_id": "GET:/api/virtual-cards",
+      "target_operation_id": "GET:/api/virtual-cards/{card_id}/transactions",
+      "source_field": "cards[].id",
+      "target_parameter": "card_id",
+      "target_parameter_location": "path",
+      "relationship_type": "id_flow",
+      "confidence": 1.0
+    }
+  ],
+  "test_candidates": [
+    {
+      "candidate_id": "candidate-001",
+      "module_id": "BOLA-001",
+      "target_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "required_object_types": [
+        "category"
+      ],
+      "rationale": "상위 응답 식별자가 객체 조회 입력으로 연결됨",
+      "priority": 1,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "category_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "category"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-002",
+      "module_id": "BOLA-001",
+      "target_operation_id": "GET:/api/transactions",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "상위 응답 식별자가 객체 조회 입력으로 연결됨",
+      "priority": 2,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "query",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-003",
+      "module_id": "BOLA-001",
+      "target_operation_id": "GET:/api/v1/payments/{payment_id}",
+      "required_object_types": [
+        "payment"
+      ],
+      "rationale": "상위 응답 식별자가 객체 조회 입력으로 연결됨",
+      "priority": 3,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "payment_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "payment"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-004",
+      "module_id": "BOLA-001",
+      "target_operation_id": "GET:/api/virtual-cards/{card_id}/transactions",
+      "required_object_types": [
+        "card"
+      ],
+      "rationale": "상위 응답 식별자가 객체 조회 입력으로 연결됨",
+      "priority": 4,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "card_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "card"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-005",
+      "module_id": "BOLA-001",
+      "target_operation_id": "GET:/check_balance/{account_number}",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "상위 응답 식별자가 객체 조회 입력으로 연결됨",
+      "priority": 5,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-006",
+      "module_id": "BOLA-001",
+      "target_operation_id": "GET:/transactions/{account_number}",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "상위 응답 식별자가 객체 조회 입력으로 연결됨",
+      "priority": 6,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-007",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "required_object_types": [
+        "category"
+      ],
+      "rationale": "GET path/query 입력의 형식·경계 검사가 가능함",
+      "priority": 7,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "category_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "category"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-008",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/transactions",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "GET path/query 입력의 형식·경계 검사가 가능함",
+      "priority": 8,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "query",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-009",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/v1/payments/merchant_id/{merchant_id}",
+      "required_object_types": [
+        "merchant"
+      ],
+      "rationale": "GET path/query 입력의 형식·경계 검사가 가능함",
+      "priority": 9,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "merchant_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "merchant"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-010",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/v1/payments/{payment_id}",
+      "required_object_types": [
+        "payment"
+      ],
+      "rationale": "GET path/query 입력의 형식·경계 검사가 가능함",
+      "priority": 10,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "payment_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "payment"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-011",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/virtual-cards/{card_id}/transactions",
+      "required_object_types": [
+        "card"
+      ],
+      "rationale": "GET path/query 입력의 형식·경계 검사가 가능함",
+      "priority": 11,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "card_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "card"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-012",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/check_balance/{account_number}",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "GET path/query 입력의 형식·경계 검사가 가능함",
+      "priority": 12,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-013",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/transactions/{account_number}",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "GET path/query 입력의 형식·경계 검사가 가능함",
+      "priority": 13,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-014",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/ai/system-info",
+      "required_object_types": [],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 14,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": []
+    },
+    {
+      "candidate_id": "candidate-015",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/bill-categories",
+      "required_object_types": [],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 15,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": []
+    },
+    {
+      "candidate_id": "candidate-016",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/bill-payments/history",
+      "required_object_types": [],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 16,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": []
+    },
+    {
+      "candidate_id": "candidate-017",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "required_object_types": [
+        "category"
+      ],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 17,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "category_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "category"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-018",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/transactions",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 18,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "query",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-019",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/virtual-cards",
+      "required_object_types": [],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 19,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": []
+    },
+    {
+      "candidate_id": "candidate-020",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/check_balance/{account_number}",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 20,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-021",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/transactions/{account_number}",
+      "required_object_types": [
+        "account"
+      ],
+      "rationale": "성공 응답 출력 필드에 데이터 노출 규칙을 적용할 수 있음",
+      "priority": 21,
+      "executable": true,
+      "missing_requirements": [],
+      "binding_hints": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "account"
+        }
+      ]
+    }
+  ]
+}

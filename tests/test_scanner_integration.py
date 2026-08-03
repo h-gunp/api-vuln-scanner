@@ -670,9 +670,9 @@ def test_complete_local_discovery_and_execution_flow_is_fixed_rule_safe_and_secr
     assert backend.timeline.index("approval") < backend.timeline.index(
         "artifact:scan_result"
     )
-    assert backend.timeline.index("artifact:scan_result") < backend.timeline.index(
+    assert backend.timeline.index(
         f"progress:{EXECUTION_JOB_ID}:COMPLETED"
-    )
+    ) < backend.timeline.index("artifact:scan_result")
 
     structural = "".join(
         envelope.content.decode("utf-8")

@@ -1,0 +1,270 @@
+{
+  "schema_version": "1.2",
+  "plan_id": "531f25d6-ef8b-5854-8e2b-5e07230fa13b",
+  "scan_id": "9bab4e72-ed2c-4306-80d1-a077899e2ee6",
+  "model_name": "gpt-4o-mini-2024-07-18",
+  "prompt_version": "plan-v2",
+  "prompt_sha256": "45fe2c585d762d9af7829622484224bbd24aecb802507ea1d86b2aced323a1e1",
+  "status": "PENDING_APPROVAL",
+  "budget": {
+    "requests_already_used": 0,
+    "estimated_execution_requests": 22,
+    "max_requests": 300,
+    "within_budget": true
+  },
+  "steps": [
+    {
+      "order": 1,
+      "candidate_id": "candidate-001",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/billers/by-category/{category_id}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "category_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "category",
+          "owner": "user_a"
+        }
+      ]
+    },
+    {
+      "order": 2,
+      "candidate_id": "candidate-002",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/transactions",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/transactions"
+      },
+      "input_bindings": [
+        {
+          "parameter": "account_number",
+          "location": "query",
+          "binding_type": "parameter_binding",
+          "object_type": null,
+          "owner": null
+        }
+      ]
+    },
+    {
+      "order": 3,
+      "candidate_id": "candidate-003",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/v1/payments/merchant_id/{merchant_id}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/v1/payments/merchant_id/{merchant_id}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "merchant_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "merchant",
+          "owner": "user_a"
+        }
+      ]
+    },
+    {
+      "order": 4,
+      "candidate_id": "candidate-004",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/v1/payments/{payment_id}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/v1/payments/{payment_id}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "payment_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "payment",
+          "owner": "user_a"
+        }
+      ]
+    },
+    {
+      "order": 5,
+      "candidate_id": "candidate-005",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/api/virtual-cards/{card_id}/transactions",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/virtual-cards/{card_id}/transactions"
+      },
+      "input_bindings": [
+        {
+          "parameter": "card_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "card",
+          "owner": "user_a"
+        }
+      ]
+    },
+    {
+      "order": 6,
+      "candidate_id": "candidate-006",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/check_balance/{account_number}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/check_balance/{account_number}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "parameter_binding",
+          "object_type": null,
+          "owner": null
+        }
+      ]
+    },
+    {
+      "order": 7,
+      "candidate_id": "candidate-007",
+      "module_id": "INPUT-001",
+      "target_operation_id": "GET:/transactions/{account_number}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/transactions/{account_number}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "parameter_binding",
+          "object_type": null,
+          "owner": null
+        }
+      ]
+    },
+    {
+      "order": 8,
+      "candidate_id": "candidate-008",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/ai/system-info",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/ai/system-info"
+      },
+      "input_bindings": []
+    },
+    {
+      "order": 9,
+      "candidate_id": "candidate-009",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/bill-categories",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/bill-categories"
+      },
+      "input_bindings": []
+    },
+    {
+      "order": 10,
+      "candidate_id": "candidate-010",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/bill-payments/history",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/bill-payments/history"
+      },
+      "input_bindings": []
+    },
+    {
+      "order": 11,
+      "candidate_id": "candidate-011",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/billers/by-category/{category_id}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/billers/by-category/{category_id}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "category_id",
+          "location": "path",
+          "binding_type": "object_binding",
+          "object_type": "category",
+          "owner": "user_a"
+        }
+      ]
+    },
+    {
+      "order": 12,
+      "candidate_id": "candidate-012",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/transactions",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/transactions"
+      },
+      "input_bindings": [
+        {
+          "parameter": "account_number",
+          "location": "query",
+          "binding_type": "parameter_binding",
+          "object_type": null,
+          "owner": null
+        }
+      ]
+    },
+    {
+      "order": 13,
+      "candidate_id": "candidate-013",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/api/virtual-cards",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/api/virtual-cards"
+      },
+      "input_bindings": []
+    },
+    {
+      "order": 14,
+      "candidate_id": "candidate-014",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/check_balance/{account_number}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/check_balance/{account_number}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "parameter_binding",
+          "object_type": null,
+          "owner": null
+        }
+      ]
+    },
+    {
+      "order": 15,
+      "candidate_id": "candidate-015",
+      "module_id": "DATA-001",
+      "target_operation_id": "GET:/transactions/{account_number}",
+      "target_endpoint": {
+        "method": "GET",
+        "path_template": "/transactions/{account_number}"
+      },
+      "input_bindings": [
+        {
+          "parameter": "account_number",
+          "location": "path",
+          "binding_type": "parameter_binding",
+          "object_type": null,
+          "owner": null
+        }
+      ]
+    }
+  ]
+}

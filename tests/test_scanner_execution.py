@@ -586,6 +586,37 @@ def test_missing_runtime_restores_count_then_reauthenticates_and_rejects_stale_p
     assert len(backend.approval_events) == 1
 
 
+def test_rejected_plan_stops_after_reporting_approval_decision() -> None:
+    backend = RecordingBackend()
+    calls: list[httpx.Request] = []
+    scanner = Scanner(
+        backend,
+        transport=transport_for(calls),
+        katana_runner=NoopKatana(),
+    )
+
+    outcome = scanner.run_execution(
+        execution_request(
+            ContractSource(
+                inline={
+                    "schema_version": "1.1",
+                    "scan_id": SCAN_ID,
+                    "operations": [],
+                }
+            ),
+            ContractSource(inline=empty_analysis_payload()),
+            ContractSource(inline=empty_plan_payload(4)),
+        )
+    )
+
+    assert outcome.decision.status is ApprovalStatus.REJECTED
+    assert backend.timeline[-1] == f"approval:{EXECUTION_JOB_ID}"
+    assert (
+        f"progress:{EXECUTION_JOB_ID}:COMPLETED"
+        not in backend.timeline
+    )
+
+
 def test_missing_runtime_rehydrates_actor_objects_from_loaded_graph_before_approval() -> None:
     backend = RecordingBackend()
     calls: list[httpx.Request] = []

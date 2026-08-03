@@ -104,6 +104,69 @@ def api_graph() -> dict:
     }
 
 
+def vulnbank_identifier_graph() -> dict:
+    return {
+        "schema_version": "1.1",
+        "scan_id": "scan-001",
+        "operations": [
+            {
+                "operation_id": "GET:/api/transactions",
+                "method": "GET",
+                "path_template": "/api/transactions",
+                "inputs": [
+                    {
+                        "location": "query",
+                        "field_path": "account_number",
+                        "type": "string",
+                    }
+                ],
+                "outputs": [
+                    {"field_path": "account_number", "type": "string"}
+                ],
+            },
+            {
+                "operation_id": "GET:/api/virtual-cards",
+                "method": "GET",
+                "path_template": "/api/virtual-cards",
+                "inputs": [],
+                "outputs": [
+                    {"field_path": "cards[].id", "type": "integer"}
+                ],
+            },
+            {
+                "operation_id": (
+                    "GET:/api/virtual-cards/{card_id}/transactions"
+                ),
+                "method": "GET",
+                "path_template": "/api/virtual-cards/{card_id}/transactions",
+                "inputs": [
+                    {
+                        "location": "path",
+                        "field_path": "card_id",
+                        "type": "integer",
+                    }
+                ],
+                "outputs": [],
+            },
+            {
+                "operation_id": (
+                    "GET:/api/v1/payments/merchant_id/{merchant_id}"
+                ),
+                "method": "GET",
+                "path_template": "/api/v1/payments/merchant_id/{merchant_id}",
+                "inputs": [
+                    {
+                        "location": "path",
+                        "field_path": "merchant_id",
+                        "type": "integer",
+                    }
+                ],
+                "outputs": [],
+            },
+        ],
+    }
+
+
 def relationship_draft(source_field: str = "items[].account_id") -> RelationshipDraft:
     return RelationshipDraft(
         relationships=[
@@ -136,6 +199,73 @@ class FakeClient:
 
 
 class LLMServiceTest(unittest.TestCase):
+    def test_empty_relationship_draft_recovers_graph_backed_bola_candidate(self):
+        service = LLMService(
+            client=FakeClient([RelationshipDraft(relationships=[])]),
+            sleep=lambda _: None,
+        )
+
+        analysis = service.analyze_relationships(target_profile(), api_graph())
+
+        self.assertEqual(1, len(analysis.relationships))
+        relationship = analysis.relationships[0]
+        self.assertEqual("id_flow", relationship.relationship_type)
+        self.assertEqual("items[].account_id", relationship.source_field)
+        self.assertEqual("account_id", relationship.target_parameter)
+        self.assertEqual(1.0, relationship.confidence)
+        bola = [
+            candidate
+            for candidate in analysis.test_candidates
+            if candidate.module_id == "BOLA-001"
+        ]
+        self.assertEqual(1, len(bola))
+        self.assertEqual(
+            "GET:/api/accounts/{account_id}",
+            bola[0].target_operation_id,
+        )
+        ScannerRelationshipAnalysis.model_validate(
+            analysis.model_dump(mode="json")
+        )
+
+    def test_recovery_supports_account_number_and_collection_ids(self):
+        analysis = LLMService(
+            client=FakeClient([RelationshipDraft(relationships=[])]),
+            sleep=lambda _: None,
+        ).analyze_relationships(target_profile(), vulnbank_identifier_graph())
+
+        pairs = {
+            (relationship.source_field, relationship.target_parameter)
+            for relationship in analysis.relationships
+        }
+        self.assertIn(("account_number", "account_number"), pairs)
+        self.assertIn(("cards[].id", "card_id"), pairs)
+        self.assertNotIn(
+            "merchant_id",
+            {
+                relationship.target_parameter
+                for relationship in analysis.relationships
+            },
+        )
+        bola_targets = {
+            candidate.target_operation_id
+            for candidate in analysis.test_candidates
+            if candidate.module_id == "BOLA-001"
+        }
+        self.assertIn("GET:/api/transactions", bola_targets)
+        self.assertIn(
+            "GET:/api/virtual-cards/{card_id}/transactions",
+            bola_targets,
+        )
+
+    def test_recovery_does_not_duplicate_llm_relationship(self):
+        analysis = LLMService(
+            client=FakeClient([relationship_draft()]),
+            sleep=lambda _: None,
+        ).analyze_relationships(target_profile(), api_graph())
+
+        self.assertEqual(1, len(analysis.relationships))
+        self.assertEqual("rel-001", analysis.relationships[0].relationship_id)
+
     def test_relationships_use_fixed_versions_and_skip_authn(self):
         client = FakeClient([relationship_draft()])
         service = LLMService(client=client, sleep=lambda _: None)

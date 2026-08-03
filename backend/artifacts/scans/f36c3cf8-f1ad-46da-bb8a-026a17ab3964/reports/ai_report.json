@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.2",
+  "scan_id": "f36c3cf8-f1ad-46da-bb8a-026a17ab3964",
+  "model_name": "gpt-4o-mini-2024-07-18",
+  "prompt_version": "report-v2",
+  "prompt_sha256": "181ad411cd192cfd9e3831abc57f15ae2044f32a78dacf7bf705c095fb49bc94",
+  "overall_risk": "low",
+  "overall_risk_basis": "rule:max_verified_severity",
+  "summary": "검증 규칙으로 확정된 취약점이 없습니다.",
+  "findings": []
+}

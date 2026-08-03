@@ -150,8 +150,15 @@ class RuntimeContext(_RuntimeOnly):
 class SessionManager:
     _OBJECT_KEYS = {
         "account_id": "account",
+        "account_number": "account",
         "transaction_id": "transaction",
         "card_id": "card",
+    }
+    _OBJECT_COLLECTIONS = {
+        "accounts": "account",
+        "transactions": "transaction",
+        "cards": "card",
+        "payments": "payment",
     }
     _OBSERVED_LOCATIONS = ("path", "query", "header", "body")
 
@@ -279,18 +286,46 @@ class SessionManager:
         value: object,
         actor_objects: dict[str, set[_RuntimeSecret]],
         metadata_objects: dict[str, set[_RuntimeSecret]],
+        *,
+        collection_object_type: str | None = None,
     ) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
-                object_type = self._OBJECT_KEYS.get(key) if isinstance(key, str) else None
+                normalized_key = key if isinstance(key, str) else None
+                object_type = (
+                    self._OBJECT_KEYS.get(normalized_key)
+                    if normalized_key is not None
+                    else None
+                )
+                if (
+                    object_type is None
+                    and normalized_key == "id"
+                    and collection_object_type is not None
+                ):
+                    object_type = collection_object_type
                 if object_type is not None and self._is_scalar(item):
                     identifier = _RuntimeSecret(str(item))
                     actor_objects.setdefault(object_type, set()).add(identifier)
                     metadata_objects.setdefault(object_type, set()).add(identifier)
-                self._collect_object_ids(item, actor_objects, metadata_objects)
+                child_collection_type = (
+                    self._OBJECT_COLLECTIONS.get(normalized_key)
+                    if normalized_key is not None
+                    else None
+                )
+                self._collect_object_ids(
+                    item,
+                    actor_objects,
+                    metadata_objects,
+                    collection_object_type=child_collection_type,
+                )
         elif isinstance(value, (list, tuple)):
             for item in value:
-                self._collect_object_ids(item, actor_objects, metadata_objects)
+                self._collect_object_ids(
+                    item,
+                    actor_objects,
+                    metadata_objects,
+                    collection_object_type=collection_object_type,
+                )
 
     @staticmethod
     def _collect_examples(
